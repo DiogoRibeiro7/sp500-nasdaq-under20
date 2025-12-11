@@ -24,6 +24,7 @@ from requests.exceptions import RequestException, Timeout
 import pandas as pd
 import yfinance as yf
 
+NASDAQ_CACHE_PATH = Path("data") / "nasdaq_tickers.csv"
 
 # ----------------------------- Configuration ---------------------------------
 
@@ -90,20 +91,44 @@ def _fetch_sp500_from_wikipedia() -> List[str]:
     )
     return tickers
 
-
-def _fetch_nasdaq_from_nasdaqtrader() -> List[str]:
+def _load_cached_nasdaq_tickers() -> List[str]:
     """
-    Fetch NASDAQ tickers from nasdaqtrader.com official list using requests.
+    Load cached NASDAQ tickers from NASDAQ_CACHE_PATH if it exists.
+
+    Returns
+    -------
+    List[str]
+        List of ticker symbols or empty list if no cache exists.
+    """
+    if not NASDAQ_CACHE_PATH.exists():
+        return []
+
+    df = pd.read_csv(NASDAQ_CACHE_PATH)
+    if "Symbol" not in df.columns:
+        raise RuntimeError(
+            f"Cached NASDAQ tickers file {NASDAQ_CACHE_PATH} has no 'Symbol' column."
+        )
+
+    tickers = (
+        df["Symbol"]
+        .dropna()
+        .astype(str)
+        .str.upper()
+        .str.strip()
+        .tolist()
+    )
+    return tickers
+
+
+def _fetch_nasdaq_from_nasdaqtrader_and_cache() -> List[str]:
+    """
+    Fetch NASDAQ tickers from nasdaqtrader.com official list using requests
+    and update the local cache file.
 
     Returns
     -------
     List[str]
         List of ticker symbols in uppercase.
-
-    Raises
-    ------
-    RuntimeError
-        If the file cannot be fetched or parsed.
     """
     url = "https://ftp.nasdaqtrader.com/dynamic/SymDir/nasdaqtraded.txt"
     headers = {
@@ -122,7 +147,6 @@ def _fetch_nasdaq_from_nasdaqtrader() -> List[str]:
     except RequestException as exc:
         raise RuntimeError(f"Error fetching NASDAQ tickers from nasdaqtrader.com: {exc}") from exc
 
-    # Use StringIO to parse the text as CSV
     df = pd.read_csv(StringIO(resp.text), sep="|")
 
     if "Symbol" not in df.columns:
@@ -134,14 +158,17 @@ def _fetch_nasdaq_from_nasdaqtrader() -> List[str]:
     if "ETPFlag" in df.columns:
         df = df[df["ETPFlag"] != "Y"]
 
-    tickers = (
-        df["Symbol"]
-        .dropna()
-        .astype(str)
-        .str.upper()
-        .str.strip()
-        .tolist()
+    df_symbols = df[["Symbol"]].copy()
+    df_symbols["Symbol"] = (
+        df_symbols["Symbol"].astype(str).str.upper().str.strip()
     )
+
+    # Ensure folder exists
+    NASDAQ_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    df_symbols.to_csv(NASDAQ_CACHE_PATH, index=False)
+    print(f"[INFO] Cached NASDAQ tickers to {NASDAQ_CACHE_PATH}")
+
+    tickers = df_symbols["Symbol"].tolist()
     return tickers
 
 
@@ -165,20 +192,25 @@ def get_index_tickers() -> Dict[str, Set[str]]:
 
     # ---- NASDAQ ----
     print("[INFO] Fetching NASDAQ tickers from nasdaqtrader.com...")
-    try:
-        nasdaq_list = _fetch_nasdaq_from_nasdaqtrader()
-        print(f"[INFO] Retrieved {len(nasdaq_list)} NASDAQ tickers.")
-    except RuntimeError as exc:
-        print(f"[WARN] Could not fetch NASDAQ tickers: {exc}")
-        print("[WARN] Continuing with S&P 500 universe only.")
-        nasdaq_list = []
+    # 1) Try cache
+    nasdaq_list = _load_cached_nasdaq_tickers()
+    if nasdaq_list:
+        print(f"[INFO] Loaded {len(nasdaq_list)} NASDAQ tickers from cache.")
+    else:
+        # 2) Try online and cache
+        try:
+            nasdaq_list = _fetch_nasdaq_from_nasdaqtrader_and_cache()
+            print(f"[INFO] Retrieved {len(nasdaq_list)} NASDAQ tickers from nasdaqtrader.com.")
+        except RuntimeError as exc:
+            print(f"[WARN] Could not fetch NASDAQ tickers: {exc}")
+            print("[WARN] Continuing with S&P 500 universe only.")
+            nasdaq_list = []
 
     sp500: Set[str] = {t.strip().upper() for t in sp500_list if t}
     nasdaq: Set[str] = {t.strip().upper() for t in nasdaq_list if t}
 
     if not sp500:
         raise RuntimeError("Could not retrieve any S&P 500 tickers.")
-    # nasdaq may be empty: we just track S&P 500 in that case.
 
     return {"sp500": sp500, "nasdaq": nasdaq}
 
