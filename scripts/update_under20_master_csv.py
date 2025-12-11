@@ -25,7 +25,7 @@ from under20_stocks import (
     HISTORY_PERIOD,
     MAX_PRICE,
     download_history_for_tickers,
-    get_index_tickers,
+    get_index_tickers_and_names,
     get_latest_closes_for_universe,
     get_yesterday_date,
     select_tickers_below_price,
