@@ -18,6 +18,8 @@ import datetime as dt
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
+import requests
+
 import pandas as pd
 import yfinance as yf
 
