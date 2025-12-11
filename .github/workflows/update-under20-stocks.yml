@@ -28,7 +28,7 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           else
-            pip install "pandas[lxml]" yfinance
+            pip install "pandas[lxml]" yfinance lxml
           fi
 
       - name: Run update script
