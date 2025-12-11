@@ -52,14 +52,14 @@ def get_yesterday_date() -> dt.date:
     return today_utc - dt.timedelta(days=1)
 
 
-def _fetch_sp500_from_wikipedia() -> List[str]:
+def _fetch_sp500_from_wikipedia() -> Tuple[List[str], Dict[str, str]]:
     """
-    Fetch S&P 500 tickers from Wikipedia using a custom User-Agent.
+    Fetch S&P 500 tickers and company names from Wikipedia.
 
     Returns
     -------
-    List[str]
-        List of ticker symbols in uppercase.
+    Tuple[List[str], Dict[str, str]]
+        (list of tickers, mapping ticker -> company name)
     """
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
     headers = {
@@ -73,23 +73,35 @@ def _fetch_sp500_from_wikipedia() -> List[str]:
     resp = requests.get(url, headers=headers, timeout=30)
     resp.raise_for_status()
 
-    # Wrap HTML in StringIO to avoid FutureWarning
     tables = pd.read_html(StringIO(resp.text))
     if not tables:
         raise RuntimeError("Could not read S&P 500 table from Wikipedia HTML.")
 
     df = tables[0]
     if "Symbol" not in df.columns:
-        raise RuntimeError("Wikipedia S&P 500 table has unexpected format (no 'Symbol' column).")
+        raise RuntimeError("Wikipedia S&P 500 table has no 'Symbol' column.")
+    # Column for name is usually 'Security'
+    name_col = "Security" if "Security" in df.columns else None
+    if name_col is None:
+        raise RuntimeError("Wikipedia S&P 500 table has no 'Security' column for names.")
 
-    tickers = (
+    symbols = (
         df["Symbol"]
         .astype(str)
         .str.upper()
         .str.strip()
         .tolist()
     )
-    return tickers
+    names = (
+        df[name_col]
+        .astype(str)
+        .str.strip()
+        .tolist()
+    )
+
+    ticker_to_name = {sym: nm for sym, nm in zip(symbols, names)}
+    return symbols, ticker_to_name
+
 
 def _load_cached_nasdaq_tickers() -> List[str]:
     """
@@ -120,15 +132,19 @@ def _load_cached_nasdaq_tickers() -> List[str]:
     return tickers
 
 
-def _fetch_nasdaq_from_nasdaqtrader_and_cache() -> List[str]:
+def _fetch_nasdaq_from_nasdaqtrader() -> Tuple[List[str], Dict[str, str]]:
     """
-    Fetch NASDAQ tickers from nasdaqtrader.com official list using requests
-    and update the local cache file.
+    Fetch NASDAQ tickers and names from nasdaqtrader.com official list.
 
     Returns
     -------
-    List[str]
-        List of ticker symbols in uppercase.
+    Tuple[List[str], Dict[str, str]]
+        (list of tickers, mapping ticker -> company name)
+
+    Raises
+    ------
+    RuntimeError
+        If the file cannot be fetched or parsed.
     """
     url = "https://ftp.nasdaqtrader.com/dynamic/SymDir/nasdaqtraded.txt"
     headers = {
@@ -150,7 +166,7 @@ def _fetch_nasdaq_from_nasdaqtrader_and_cache() -> List[str]:
     df = pd.read_csv(StringIO(resp.text), sep="|")
 
     if "Symbol" not in df.columns:
-        raise RuntimeError("Nasdaq trader file has unexpected format (no 'Symbol' column).")
+        raise RuntimeError("Nasdaq trader file has no 'Symbol' column.")
 
     # Filter out test issues and ETFs if those columns exist
     if "Test Issue" in df.columns:
@@ -158,61 +174,74 @@ def _fetch_nasdaq_from_nasdaqtrader_and_cache() -> List[str]:
     if "ETPFlag" in df.columns:
         df = df[df["ETPFlag"] != "Y"]
 
-    df_symbols = df[["Symbol"]].copy()
-    df_symbols["Symbol"] = (
-        df_symbols["Symbol"].astype(str).str.upper().str.strip()
-    )
+    df = df[df["Symbol"].notna()].copy()
+    df["Symbol"] = df["Symbol"].astype(str).str.upper().str.strip()
 
-    # Ensure folder exists
-    NASDAQ_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    df_symbols.to_csv(NASDAQ_CACHE_PATH, index=False)
-    print(f"[INFO] Cached NASDAQ tickers to {NASDAQ_CACHE_PATH}")
+    if "Security Name" in df.columns:
+        df["Security Name"] = df["Security Name"].astype(str).str.strip()
+        name_series = df["Security Name"]
+    else:
+        # Fallback: name = symbol
+        name_series = df["Symbol"]
 
-    tickers = df_symbols["Symbol"].tolist()
-    return tickers
+    symbols = df["Symbol"].tolist()
+    names = name_series.tolist()
+    ticker_to_name = {sym: nm for sym, nm in zip(symbols, names)}
+
+    return symbols, ticker_to_name
 
 
-def get_index_tickers() -> Dict[str, Set[str]]:
+def get_index_tickers_and_names() -> Tuple[Dict[str, Set[str]], Dict[str, str]]:
     """
-    Fetch tickers for S&P 500 and NASDAQ.
-
-    - S&P 500 from Wikipedia.
-    - NASDAQ from nasdaqtrader.com.
-    - If NASDAQ fetch fails (timeout, etc.), continue with empty NASDAQ set.
+    Fetch tickers and company names for S&P 500 and NASDAQ.
 
     Returns
     -------
-    Dict[str, Set[str]]
-        Dictionary with keys "sp500" and "nasdaq" and sets of tickers.
+    Tuple[Dict[str, Set[str]], Dict[str, str]]
+        (
+            {
+              "sp500": {ticker, ...},
+              "nasdaq": {ticker, ...}
+            },
+            {ticker: name, ...}
+        )
     """
     # ---- S&P 500 ----
     print("[INFO] Fetching S&P 500 tickers from Wikipedia...")
-    sp500_list = _fetch_sp500_from_wikipedia()
+    sp500_list, sp500_name_map = _fetch_sp500_from_wikipedia()
     print(f"[INFO] Retrieved {len(sp500_list)} S&P 500 tickers.")
 
     # ---- NASDAQ ----
     print("[INFO] Fetching NASDAQ tickers from nasdaqtrader.com...")
-    # 1) Try cache
-    nasdaq_list = _load_cached_nasdaq_tickers()
-    if nasdaq_list:
-        print(f"[INFO] Loaded {len(nasdaq_list)} NASDAQ tickers from cache.")
-    else:
-        # 2) Try online and cache
-        try:
-            nasdaq_list = _fetch_nasdaq_from_nasdaqtrader_and_cache()
-            print(f"[INFO] Retrieved {len(nasdaq_list)} NASDAQ tickers from nasdaqtrader.com.")
-        except RuntimeError as exc:
-            print(f"[WARN] Could not fetch NASDAQ tickers: {exc}")
-            print("[WARN] Continuing with S&P 500 universe only.")
-            nasdaq_list = []
+    try:
+        nasdaq_list, nasdaq_name_map = _fetch_nasdaq_from_nasdaqtrader()
+        print(f"[INFO] Retrieved {len(nasdaq_list)} NASDAQ tickers.")
+    except RuntimeError as exc:
+        print(f"[WARN] Could not fetch NASDAQ tickers: {exc}")
+        print("[WARN] Continuing with S&P 500 universe only.")
+        nasdaq_list, nasdaq_name_map = [], {}
 
-    sp500: Set[str] = {t.strip().upper() for t in sp500_list if t}
-    nasdaq: Set[str] = {t.strip().upper() for t in nasdaq_list if t}
+    tickers_by_index: Dict[str, Set[str]] = {
+        "sp500": {t for t in sp500_list if t},
+        "nasdaq": {t for t in nasdaq_list if t},
+    }
 
-    if not sp500:
+    ticker_to_name: Dict[str, str] = {}
+    ticker_to_name.update(sp500_name_map)
+    ticker_to_name.update(nasdaq_name_map)
+
+    if not tickers_by_index["sp500"]:
         raise RuntimeError("Could not retrieve any S&P 500 tickers.")
 
-    return {"sp500": sp500, "nasdaq": nasdaq}
+    return tickers_by_index, ticker_to_name
+
+
+def get_index_tickers() -> Dict[str, Set[str]]:
+    """
+    Backwards-compatible wrapper that returns only ticker sets per index.
+    """
+    tickers_by_index, _ = get_index_tickers_and_names()
+    return tickers_by_index
 
 
 def chunked(iterable: Iterable[str], size: int) -> Iterable[List[str]]:
