@@ -52,17 +52,31 @@ def _fetch_sp500_from_wikipedia() -> List[str]:
     """
     Fetch S&P 500 tickers from Wikipedia.
 
+    Uses a custom User-Agent to avoid 403 errors on GitHub runners.
+
     Returns
     -------
     List[str]
         List of ticker symbols in uppercase.
     """
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    tables = pd.read_html(url)
-    if not tables:
-        raise RuntimeError("Could not read S&P 500 table from Wikipedia.")
-    df = tables[0]
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0 Safari/537.36"
+        )
+    }
 
+    resp = requests.get(url, headers=headers, timeout=30)
+    resp.raise_for_status()  # will raise HTTPError if still 4xx/5xx
+
+    # Parse tables from the HTML content
+    tables = pd.read_html(resp.text)
+    if not tables:
+        raise RuntimeError("Could not read S&P 500 table from Wikipedia HTML.")
+
+    df = tables[0]
     if "Symbol" not in df.columns:
         raise RuntimeError("Wikipedia S&P 500 table has unexpected format (no 'Symbol' column).")
 
