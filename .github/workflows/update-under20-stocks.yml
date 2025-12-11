@@ -1,0 +1,51 @@
+name: Update under-20 stocks CSV
+
+on:
+  schedule:
+    # Every day at 01:00 UTC
+    - cron: "0 1 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  update-under20-csv:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write  # needed to push the updated CSV
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install yfinance pandas
+          fi
+
+      - name: Run update script
+        run: |
+          python scripts/update_under20_master_csv.py
+
+      - name: Configure git for commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Commit and push changes if any
+        run: |
+          if git diff --quiet; then
+            echo "No changes to commit."
+          else
+            git add data/under20_history.csv
+            git commit -m "chore: update under-20 stocks CSV [skip ci]"
+            git push
+          fi
