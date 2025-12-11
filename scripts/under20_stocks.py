@@ -48,26 +48,90 @@ def get_yesterday_date() -> dt.date:
     return today_utc - dt.timedelta(days=1)
 
 
+def _fetch_sp500_from_wikipedia() -> List[str]:
+    """
+    Fetch S&P 500 tickers from Wikipedia.
+
+    Returns
+    -------
+    List[str]
+        List of ticker symbols in uppercase.
+    """
+    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    tables = pd.read_html(url)
+    if not tables:
+        raise RuntimeError("Could not read S&P 500 table from Wikipedia.")
+    df = tables[0]
+
+    if "Symbol" not in df.columns:
+        raise RuntimeError("Wikipedia S&P 500 table has unexpected format (no 'Symbol' column).")
+
+    tickers = (
+        df["Symbol"]
+        .astype(str)
+        .str.upper()
+        .str.strip()
+        .tolist()
+    )
+    return tickers
+
+
+def _fetch_nasdaq_from_nasdaqtrader() -> List[str]:
+    """
+    Fetch NASDAQ tickers from nasdaqtrader.com official list.
+
+    Returns
+    -------
+    List[str]
+        List of ticker symbols in uppercase.
+    """
+    url = "https://ftp.nasdaqtrader.com/dynamic/SymDir/nasdaqtraded.txt"
+    df = pd.read_csv(url, sep="|")
+
+    if "Symbol" not in df.columns:
+        raise RuntimeError("Nasdaq trader file has unexpected format (no 'Symbol' column).")
+
+    # Filter out test issues and ETFs if those columns exist
+    if "Test Issue" in df.columns:
+        df = df[df["Test Issue"] != "Y"]
+    if "ETPFlag" in df.columns:
+        df = df[df["ETPFlag"] != "Y"]
+
+    tickers = (
+        df["Symbol"]
+        .dropna()
+        .astype(str)
+        .str.upper()
+        .str.strip()
+        .tolist()
+    )
+    return tickers
+
+
 def get_index_tickers() -> Dict[str, Set[str]]:
     """
-    Fetch tickers for S&P 500 and NASDAQ via yfinance.
+    Fetch tickers for S&P 500 and NASDAQ without relying on yfinance helpers.
 
     Returns
     -------
     Dict[str, Set[str]]
         Dictionary with keys "sp500" and "nasdaq" and sets of tickers.
     """
-    sp500_tickers: List[str] = yf.tickers_sp500()
-    nasdaq_tickers: List[str] = yf.tickers_nasdaq()
+    print("[INFO] Fetching S&P 500 tickers from Wikipedia...")
+    sp500_list = _fetch_sp500_from_wikipedia()
+    print(f"[INFO] Retrieved {len(sp500_list)} S&P 500 tickers.")
 
-    # Normalize to uppercase and strip spaces
-    sp500: Set[str] = {t.strip().upper() for t in sp500_tickers if t.strip()}
-    nasdaq: Set[str] = {t.strip().upper() for t in nasdaq_tickers if t.strip()}
+    print("[INFO] Fetching NASDAQ tickers from nasdaqtrader.com...")
+    nasdaq_list = _fetch_nasdaq_from_nasdaqtrader()
+    print(f"[INFO] Retrieved {len(nasdaq_list)} NASDAQ tickers.")
+
+    sp500: Set[str] = {t.strip().upper() for t in sp500_list if t}
+    nasdaq: Set[str] = {t.strip().upper() for t in nasdaq_list if t}
 
     if not sp500:
-        raise RuntimeError("Could not retrieve any S&P 500 tickers from yfinance.")
+        raise RuntimeError("Could not retrieve any S&P 500 tickers.")
     if not nasdaq:
-        raise RuntimeError("Could not retrieve any NASDAQ tickers from yfinance.")
+        raise RuntimeError("Could not retrieve any NASDAQ tickers.")
 
     return {"sp500": sp500, "nasdaq": nasdaq}
 
