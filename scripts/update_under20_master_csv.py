@@ -270,13 +270,13 @@ def main() -> None:
     print(f"[INFO] Using target date (yesterday): {as_of_date.isoformat()}")
     print(f"[INFO] History period: {HISTORY_PERIOD}, max price: {MAX_PRICE} USD")
 
-    index_tickers = get_index_tickers()
-    sp500 = index_tickers["sp500"]
-    nasdaq = index_tickers["nasdaq"]  # may be empty if NASDAQ fetch failed
+    tickers_by_index, ticker_name_map = get_index_tickers_and_names()
+    sp500 = tickers_by_index["sp500"]
+    nasdaq = tickers_by_index["nasdaq"]  # may be empty if NASDAQ fetch failed
 
     all_universe = sp500.union(nasdaq)
     print(f"[INFO] Total unique tickers in universe: {len(all_universe)}")
-
+    
     latest_closes = get_latest_closes_for_universe(
         all_tickers=all_universe,
         target_date=as_of_date,
@@ -310,9 +310,11 @@ def main() -> None:
     new_rows = _build_new_rows_dataframe(history)
     print(f"[INFO] New rows collected: {len(new_rows)}")
 
-    # Fetch human-readable names for each ticker
-    ticker_names = _fetch_ticker_names(selected_tickers)
-    new_rows = _attach_names_to_rows(new_rows, ticker_names)
+    # Build name mapping only for the selected tickers
+    ticker_names_for_selected = {
+        t: ticker_name_map.get(t, t) for t in selected_tickers
+    }
+    new_rows = _attach_names_to_rows(new_rows, ticker_names_for_selected)
 
     existing = _load_existing_master()
     print(f"[INFO] Existing master rows: {len(existing)}")
