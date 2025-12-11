@@ -1,0 +1,1 @@
+# sp500-nasdaq-under20
