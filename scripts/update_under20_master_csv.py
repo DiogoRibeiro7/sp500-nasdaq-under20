@@ -19,7 +19,7 @@ from typing import Dict, List
 
 import pandas as pd
 
-from scripts.under20_stocks import (
+from under20_stocks import (
     HISTORY_PERIOD,
     MAX_PRICE,
     download_history_for_tickers,
