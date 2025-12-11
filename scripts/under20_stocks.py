@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import datetime as dt
 from pathlib import Path
+from io import StringIO
 from typing import Dict, Iterable, List, Optional, Set, Tuple
-
 import requests
+from requests.exceptions import RequestException, Timeout
 
 import pandas as pd
 import yfinance as yf
@@ -52,9 +53,7 @@ def get_yesterday_date() -> dt.date:
 
 def _fetch_sp500_from_wikipedia() -> List[str]:
     """
-    Fetch S&P 500 tickers from Wikipedia.
-
-    Uses a custom User-Agent to avoid 403 errors on GitHub runners.
+    Fetch S&P 500 tickers from Wikipedia using a custom User-Agent.
 
     Returns
     -------
@@ -71,10 +70,10 @@ def _fetch_sp500_from_wikipedia() -> List[str]:
     }
 
     resp = requests.get(url, headers=headers, timeout=30)
-    resp.raise_for_status()  # will raise HTTPError if still 4xx/5xx
+    resp.raise_for_status()
 
-    # Parse tables from the HTML content
-    tables = pd.read_html(resp.text)
+    # Wrap HTML in StringIO to avoid FutureWarning
+    tables = pd.read_html(StringIO(resp.text))
     if not tables:
         raise RuntimeError("Could not read S&P 500 table from Wikipedia HTML.")
 
@@ -94,15 +93,37 @@ def _fetch_sp500_from_wikipedia() -> List[str]:
 
 def _fetch_nasdaq_from_nasdaqtrader() -> List[str]:
     """
-    Fetch NASDAQ tickers from nasdaqtrader.com official list.
+    Fetch NASDAQ tickers from nasdaqtrader.com official list using requests.
 
     Returns
     -------
     List[str]
         List of ticker symbols in uppercase.
+
+    Raises
+    ------
+    RuntimeError
+        If the file cannot be fetched or parsed.
     """
     url = "https://ftp.nasdaqtrader.com/dynamic/SymDir/nasdaqtraded.txt"
-    df = pd.read_csv(url, sep="|")
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0 Safari/537.36"
+        )
+    }
+
+    try:
+        resp = requests.get(url, headers=headers, timeout=30)
+        resp.raise_for_status()
+    except Timeout as exc:
+        raise RuntimeError("Timeout fetching NASDAQ tickers from nasdaqtrader.com") from exc
+    except RequestException as exc:
+        raise RuntimeError(f"Error fetching NASDAQ tickers from nasdaqtrader.com: {exc}") from exc
+
+    # Use StringIO to parse the text as CSV
+    df = pd.read_csv(StringIO(resp.text), sep="|")
 
     if "Symbol" not in df.columns:
         raise RuntimeError("Nasdaq trader file has unexpected format (no 'Symbol' column).")
@@ -126,28 +147,38 @@ def _fetch_nasdaq_from_nasdaqtrader() -> List[str]:
 
 def get_index_tickers() -> Dict[str, Set[str]]:
     """
-    Fetch tickers for S&P 500 and NASDAQ without relying on yfinance helpers.
+    Fetch tickers for S&P 500 and NASDAQ.
+
+    - S&P 500 from Wikipedia.
+    - NASDAQ from nasdaqtrader.com.
+    - If NASDAQ fetch fails (timeout, etc.), continue with empty NASDAQ set.
 
     Returns
     -------
     Dict[str, Set[str]]
         Dictionary with keys "sp500" and "nasdaq" and sets of tickers.
     """
+    # ---- S&P 500 ----
     print("[INFO] Fetching S&P 500 tickers from Wikipedia...")
     sp500_list = _fetch_sp500_from_wikipedia()
     print(f"[INFO] Retrieved {len(sp500_list)} S&P 500 tickers.")
 
+    # ---- NASDAQ ----
     print("[INFO] Fetching NASDAQ tickers from nasdaqtrader.com...")
-    nasdaq_list = _fetch_nasdaq_from_nasdaqtrader()
-    print(f"[INFO] Retrieved {len(nasdaq_list)} NASDAQ tickers.")
+    try:
+        nasdaq_list = _fetch_nasdaq_from_nasdaqtrader()
+        print(f"[INFO] Retrieved {len(nasdaq_list)} NASDAQ tickers.")
+    except RuntimeError as exc:
+        print(f"[WARN] Could not fetch NASDAQ tickers: {exc}")
+        print("[WARN] Continuing with S&P 500 universe only.")
+        nasdaq_list = []
 
     sp500: Set[str] = {t.strip().upper() for t in sp500_list if t}
     nasdaq: Set[str] = {t.strip().upper() for t in nasdaq_list if t}
 
     if not sp500:
         raise RuntimeError("Could not retrieve any S&P 500 tickers.")
-    if not nasdaq:
-        raise RuntimeError("Could not retrieve any NASDAQ tickers.")
+    # nasdaq may be empty: we just track S&P 500 in that case.
 
     return {"sp500": sp500, "nasdaq": nasdaq}
 
