@@ -1,6 +1,6 @@
 """
 Incrementally update a single CSV with daily history of all
-S&P500 + NASDAQ stocks that were < 20 USD on "yesterday".
+S&P500 + NASDAQ (when available) stocks that were < 20 USD on "yesterday".
 
 - Uses helper functions from scripts.under20_stocks
 - Maintains a single CSV file at data/under20_history.csv
@@ -8,7 +8,8 @@ S&P500 + NASDAQ stocks that were < 20 USD on "yesterday".
     1. Compute "yesterday" (UTC).
     2. Find all tickers with last close < 20 USD on or before yesterday.
     3. Download 1 year of daily history for those tickers.
-    4. Append missing rows to the master CSV (no duplicates).
+    4. Fetch human-readable company names from yfinance.
+    5. Append missing rows (with names) to the master CSV (no duplicates).
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from pathlib import Path
 from typing import Dict, List
 
 import pandas as pd
+import yfinance as yf
 
 from under20_stocks import (
     HISTORY_PERIOD,
@@ -32,14 +34,30 @@ from under20_stocks import (
 MASTER_CSV_PATH: Path = Path("data") / "under20_history.csv"
 
 
+# ---------------------------------------------------------------------------
+# Helpers for building / loading the master CSV
+# ---------------------------------------------------------------------------
+
+
 def _build_new_rows_dataframe(
     history: Dict[str, pd.DataFrame],
 ) -> pd.DataFrame:
     """
     Convert a dict[ticker -> DataFrame] into a flat DataFrame suitable for CSV.
 
-    Each row has:
+    Each row has (when available):
         Date, Ticker, Open, High, Low, Close, Adj Close, Volume
+
+    Parameters
+    ----------
+    history : Dict[str, pd.DataFrame]
+        Mapping from ticker symbol to its OHLCV DataFrame.
+
+    Returns
+    -------
+    pd.DataFrame
+        Long-format DataFrame with one row per (Date, Ticker).
+        The Name column is NOT added here; it is merged later.
     """
     records: List[pd.DataFrame] = []
 
@@ -58,13 +76,19 @@ def _build_new_rows_dataframe(
             "Adj_Close": "Adj Close",
             "adjclose": "Adj Close",
         }
-        # This is defensive: we only rename if the column exists
         for old, new in rename_map.items():
             if old in df_local.columns and new not in df_local.columns:
                 df_local.rename(columns={old: new}, inplace=True)
 
-        required_cols = ["Date", "Open", "High", "Low", "Close", "Adj Close", "Volume"]
-        # Keep only required columns that exist
+        required_cols = [
+            "Date",
+            "Open",
+            "High",
+            "Low",
+            "Close",
+            "Adj Close",
+            "Volume",
+        ]
         cols_to_keep = [c for c in required_cols if c in df_local.columns]
         df_local = df_local[cols_to_keep]
 
@@ -72,8 +96,18 @@ def _build_new_rows_dataframe(
         records.append(df_local)
 
     if not records:
+        # Return an empty frame with the expected columns
         return pd.DataFrame(
-            columns=["Date", "Ticker", "Open", "High", "Low", "Close", "Adj Close", "Volume"]  # type: ignore[list-item]
+            columns=[
+                "Date",
+                "Ticker",
+                "Open",
+                "High",
+                "Low",
+                "Close",
+                "Adj Close",
+                "Volume",
+            ]
         )
 
     return pd.concat(records, ignore_index=True)
@@ -86,14 +120,29 @@ def _load_existing_master() -> pd.DataFrame:
     Returns
     -------
     pd.DataFrame
-        DataFrame with at least columns ["Date", "Ticker"].
+        DataFrame with at least columns ["Date", "Ticker", "Name"].
     """
     if not MASTER_CSV_PATH.exists():
         return pd.DataFrame(
-            columns=["Date", "Ticker", "Open", "High", "Low", "Close", "Adj Close", "Volume"]  # type: ignore[list-item]
+            columns=[
+                "Date",
+                "Ticker",
+                "Name",
+                "Open",
+                "High",
+                "Low",
+                "Close",
+                "Adj Close",
+                "Volume",
+            ]
         )
 
     df = pd.read_csv(MASTER_CSV_PATH, parse_dates=["Date"])
+
+    # Backwards-compatibility: if an old CSV has no Name column, add it
+    if "Name" not in df.columns:
+        df["Name"] = pd.NA
+
     return df
 
 
@@ -109,7 +158,7 @@ def _merge_and_deduplicate(
     existing : pd.DataFrame
         Existing master dataset.
     new_rows : pd.DataFrame
-        New rows to be added.
+        New rows to be added. Must already contain a Name column.
 
     Returns
     -------
@@ -121,15 +170,86 @@ def _merge_and_deduplicate(
 
     combined = pd.concat([existing, new_rows], ignore_index=True)
 
-    # Ensure Date is datetime
     combined["Date"] = pd.to_datetime(combined["Date"])
 
-    # Drop duplicate rows based on (Date, Ticker)
+    # Drop duplicates based on (Date, Ticker) only.
+    # We keep the first occurrence (typically the existing row).
     combined = combined.drop_duplicates(subset=["Date", "Ticker"])
 
     # Sort for readability
     combined = combined.sort_values(by=["Date", "Ticker"]).reset_index(drop=True)
     return combined
+
+
+# ---------------------------------------------------------------------------
+# Helpers for fetching company names from yfinance
+# ---------------------------------------------------------------------------
+
+
+def _fetch_ticker_names(tickers: List[str]) -> Dict[str, str]:
+    """
+    Fetch human-readable company names for each ticker using yfinance.
+
+    Parameters
+    ----------
+    tickers : List[str]
+        List of ticker symbols.
+
+    Returns
+    -------
+    Dict[str, str]
+        Mapping ticker -> company name (or ticker itself if unknown).
+    """
+    names: Dict[str, str] = {}
+
+    for ticker in tickers:
+        try:
+            ticker_obj = yf.Ticker(ticker)
+            info: Dict[str, object] = ticker_obj.info  # may trigger a network call
+
+            name = info.get("shortName") or info.get("longName")
+            if not isinstance(name, str) or not name.strip():
+                name = ticker  # fallback: use ticker as name
+
+            names[ticker] = name.strip()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[WARN] Could not fetch name for {ticker}: {exc}")
+            names[ticker] = ticker
+
+    return names
+
+
+def _attach_names_to_rows(
+    rows: pd.DataFrame,
+    ticker_names: Dict[str, str],
+) -> pd.DataFrame:
+    """
+    Add a Name column to the rows DataFrame based on a ticker->name mapping.
+
+    Parameters
+    ----------
+    rows : pd.DataFrame
+        DataFrame with at least a 'Ticker' column.
+    ticker_names : Dict[str, str]
+        Mapping from ticker to human-readable company name.
+
+    Returns
+    -------
+    pd.DataFrame
+        Copy of rows with an extra 'Name' column.
+    """
+    if rows.empty:
+        rows["Name"] = pd.Series(dtype="string")
+        return rows
+
+    rows = rows.copy()
+    rows["Name"] = rows["Ticker"].map(ticker_names).fillna(rows["Ticker"])
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Main incremental update pipeline
+# ---------------------------------------------------------------------------
 
 
 def main() -> None:
@@ -139,11 +259,12 @@ def main() -> None:
     Steps
     -----
     1. Compute "yesterday" (UTC).
-    2. Gather S&P 500 and NASDAQ tickers.
+    2. Gather S&P 500 and NASDAQ tickers (when NASDAQ is reachable).
     3. Retrieve latest close price up to yesterday for all tickers.
     4. Select tickers with close < MAX_PRICE.
     5. Download 1 year of daily history for selected tickers.
-    6. Convert to flat DataFrame and merge into master CSV, deduplicating rows.
+    6. Fetch ticker names from yfinance.
+    7. Convert to flat DataFrame, attach names, and merge into master CSV.
     """
     as_of_date: dt.date = get_yesterday_date()
     print(f"[INFO] Using target date (yesterday): {as_of_date.isoformat()}")
@@ -151,7 +272,7 @@ def main() -> None:
 
     index_tickers = get_index_tickers()
     sp500 = index_tickers["sp500"]
-    nasdaq = index_tickers["nasdaq"]
+    nasdaq = index_tickers["nasdaq"]  # may be empty if NASDAQ fetch failed
 
     all_universe = sp500.union(nasdaq)
     print(f"[INFO] Total unique tickers in universe: {len(all_universe)}")
@@ -175,6 +296,7 @@ def main() -> None:
         print("[WARN] No tickers met the price criterion. Nothing to update.")
         return
 
+    # Download historical OHLCV data
     history = download_history_for_tickers(
         tickers=selected_tickers,
         period=HISTORY_PERIOD,
@@ -184,8 +306,13 @@ def main() -> None:
         print("[WARN] No historical data downloaded. Nothing to update.")
         return
 
+    # Convert dict[ticker -> DataFrame] into a long DataFrame
     new_rows = _build_new_rows_dataframe(history)
     print(f"[INFO] New rows collected: {len(new_rows)}")
+
+    # Fetch human-readable names for each ticker
+    ticker_names = _fetch_ticker_names(selected_tickers)
+    new_rows = _attach_names_to_rows(new_rows, ticker_names)
 
     existing = _load_existing_master()
     print(f"[INFO] Existing master rows: {len(existing)}")
@@ -194,6 +321,22 @@ def main() -> None:
     print(f"[INFO] Updated master rows after dedupe: {len(updated)}")
 
     MASTER_CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    # Reorder columns for nicer CSV
+    desired_order = [
+        "Date",
+        "Ticker",
+        "Name",
+        "Open",
+        "High",
+        "Low",
+        "Close",
+        "Adj Close",
+        "Volume",
+    ]
+    cols_in_df = [c for c in desired_order if c in updated.columns]
+    updated = updated[cols_in_df]
+
     updated.to_csv(MASTER_CSV_PATH, index=False)
     print(f"[INFO] Master CSV updated at: {MASTER_CSV_PATH}")
 
