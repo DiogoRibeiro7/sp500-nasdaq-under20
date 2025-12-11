@@ -42,10 +42,15 @@ jobs:
 
       - name: Commit and push changes if any
         run: |
-          if git diff --quiet; then
-            echo "No changes to commit."
-          else
+          # Show status for debugging (optional)
+          git status
+
+          # If there are any changes (tracked or untracked), commit them
+          if [ -n "$(git status --porcelain)" ]; then
             git add data/under20_history.csv
             git commit -m "chore: update under-20 stocks CSV [skip ci]"
             git push
+          else
+            echo "No changes to commit."
           fi
+
