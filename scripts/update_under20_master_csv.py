@@ -172,9 +172,20 @@ def _merge_and_deduplicate(
 
     combined["Date"] = pd.to_datetime(combined["Date"])
 
-    # Drop duplicates based on (Date, Ticker) only.
-    # We keep the first occurrence (typically the existing row).
-    combined = combined.drop_duplicates(subset=["Date", "Ticker"])
+    # Prefer rows where we actually have a company name.
+    has_name = (
+        combined["Name"]
+        .astype(str)
+        .str.strip()
+        .ne("")
+    )
+    combined = combined.assign(_has_name=has_name)
+
+    # Sort so that rows lacking names appear first within each (Date, Ticker),
+    # then drop duplicates keeping the last occurrence (with a name when available).
+    combined = combined.sort_values(by=["Date", "Ticker", "_has_name"])
+    combined = combined.drop_duplicates(subset=["Date", "Ticker"], keep="last")
+    combined = combined.drop(columns="_has_name")
 
     # Sort for readability
     combined = combined.sort_values(by=["Date", "Ticker"]).reset_index(drop=True)

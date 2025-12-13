@@ -1,5 +1,5 @@
 """
-Download NASDAQ + S&P 500 stocks that were below a given price threshold
+Download NASDAQ-100 + S&P 500 stocks that were below a given price threshold
 on the last trading day (“yesterday”) and save their last year of history.
 
 Requirements:
@@ -103,17 +103,18 @@ def _fetch_sp500_from_wikipedia() -> Tuple[List[str], Dict[str, str]]:
     return symbols, ticker_to_name
 
 
-def _load_cached_nasdaq_tickers() -> List[str]:
+def _load_cached_nasdaq_tickers() -> Tuple[List[str], Dict[str, str]]:
     """
-    Load cached NASDAQ tickers from NASDAQ_CACHE_PATH if it exists.
+    Load cached NASDAQ tickers (and optional names) from NASDAQ_CACHE_PATH.
 
     Returns
     -------
-    List[str]
-        List of ticker symbols or empty list if no cache exists.
+    Tuple[List[str], Dict[str, str]]
+        (list of ticker symbols, mapping ticker -> company name) or empty values
+        if the cache does not exist.
     """
     if not NASDAQ_CACHE_PATH.exists():
-        return []
+        return [], {}
 
     df = pd.read_csv(NASDAQ_CACHE_PATH)
     if "Symbol" not in df.columns:
@@ -121,7 +122,7 @@ def _load_cached_nasdaq_tickers() -> List[str]:
             f"Cached NASDAQ tickers file {NASDAQ_CACHE_PATH} has no 'Symbol' column."
         )
 
-    tickers = (
+    symbols = (
         df["Symbol"]
         .dropna()
         .astype(str)
@@ -129,24 +130,49 @@ def _load_cached_nasdaq_tickers() -> List[str]:
         .str.strip()
         .tolist()
     )
-    return tickers
+
+    if "Security Name" in df.columns:
+        names = (
+            df["Security Name"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .tolist()
+        )
+    else:
+        names = symbols
+
+    ticker_to_name = {sym: nm for sym, nm in zip(symbols, names)}
+    return symbols, ticker_to_name
 
 
-def _fetch_nasdaq_from_nasdaqtrader() -> Tuple[List[str], Dict[str, str]]:
+def _save_cached_nasdaq_tickers(symbols: List[str], ticker_to_name: Dict[str, str]) -> None:
     """
-    Fetch NASDAQ tickers and names from nasdaqtrader.com official list.
+    Persist NASDAQ ticker symbols and names to NASDAQ_CACHE_PATH.
+    """
+    if not symbols:
+        return
+
+    NASDAQ_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    df = pd.DataFrame(
+        {
+            "Symbol": symbols,
+            "Security Name": [ticker_to_name.get(sym, "") for sym in symbols],
+        }
+    )
+    df.to_csv(NASDAQ_CACHE_PATH, index=False)
+
+
+def _fetch_nasdaq100_from_wikipedia() -> Tuple[List[str], Dict[str, str]]:
+    """
+    Fetch NASDAQ-100 tickers and company names from Wikipedia.
 
     Returns
     -------
     Tuple[List[str], Dict[str, str]]
         (list of tickers, mapping ticker -> company name)
-
-    Raises
-    ------
-    RuntimeError
-        If the file cannot be fetched or parsed.
     """
-    url = "https://ftp.nasdaqtrader.com/dynamic/SymDir/nasdaqtraded.txt"
+    url = "https://en.wikipedia.org/wiki/Nasdaq-100"
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (X11; Linux x86_64) "
@@ -159,35 +185,36 @@ def _fetch_nasdaq_from_nasdaqtrader() -> Tuple[List[str], Dict[str, str]]:
         resp = requests.get(url, headers=headers, timeout=30)
         resp.raise_for_status()
     except Timeout as exc:
-        raise RuntimeError("Timeout fetching NASDAQ tickers from nasdaqtrader.com") from exc
+        raise RuntimeError("Timeout fetching NASDAQ-100 tickers from Wikipedia") from exc
     except RequestException as exc:
-        raise RuntimeError(f"Error fetching NASDAQ tickers from nasdaqtrader.com: {exc}") from exc
+        raise RuntimeError(f"Error fetching NASDAQ-100 tickers from Wikipedia: {exc}") from exc
 
-    df = pd.read_csv(StringIO(resp.text), sep="|")
+    tables = pd.read_html(StringIO(resp.text))
+    candidate_df: Optional[pd.DataFrame] = None
+    for table in tables:
+        if "Ticker" in table.columns:
+            candidate_df = table.copy()
+            break
+    if candidate_df is None:
+        raise RuntimeError("Could not locate NASDAQ-100 table on Wikipedia page.")
 
-    if "Symbol" not in df.columns:
-        raise RuntimeError("Nasdaq trader file has no 'Symbol' column.")
+    name_column: Optional[str] = None
+    for col in ["Company", "Company Name", "Security", "Name"]:
+        if col in candidate_df.columns:
+            name_column = col
+            break
+    if name_column is None:
+        raise RuntimeError("NASDAQ-100 table missing company name column.")
 
-    # Filter out test issues and ETFs if those columns exist
-    if "Test Issue" in df.columns:
-        df = df[df["Test Issue"] != "Y"]
-    if "ETPFlag" in df.columns:
-        df = df[df["ETPFlag"] != "Y"]
+    candidate_df = candidate_df[candidate_df["Ticker"].notna()].copy()
+    candidate_df["Ticker"] = candidate_df["Ticker"].astype(str).str.upper().str.strip()
+    candidate_df[name_column] = (
+        candidate_df[name_column].fillna("").astype(str).str.strip()
+    )
 
-    df = df[df["Symbol"].notna()].copy()
-    df["Symbol"] = df["Symbol"].astype(str).str.upper().str.strip()
-
-    if "Security Name" in df.columns:
-        df["Security Name"] = df["Security Name"].astype(str).str.strip()
-        name_series = df["Security Name"]
-    else:
-        # Fallback: name = symbol
-        name_series = df["Symbol"]
-
-    symbols = df["Symbol"].tolist()
-    names = name_series.tolist()
+    symbols = candidate_df["Ticker"].tolist()
+    names = candidate_df[name_column].tolist()
     ticker_to_name = {sym: nm for sym, nm in zip(symbols, names)}
-
     return symbols, ticker_to_name
 
 
@@ -212,14 +239,23 @@ def get_index_tickers_and_names() -> Tuple[Dict[str, Set[str]], Dict[str, str]]:
     print(f"[INFO] Retrieved {len(sp500_list)} S&P 500 tickers.")
 
     # ---- NASDAQ ----
-    print("[INFO] Fetching NASDAQ tickers from nasdaqtrader.com...")
+    cached_nasdaq, cached_nasdaq_names = _load_cached_nasdaq_tickers()
+    print("[INFO] Fetching NASDAQ-100 tickers from Wikipedia...")
     try:
-        nasdaq_list, nasdaq_name_map = _fetch_nasdaq_from_nasdaqtrader()
-        print(f"[INFO] Retrieved {len(nasdaq_list)} NASDAQ tickers.")
+        nasdaq_list, nasdaq_name_map = _fetch_nasdaq100_from_wikipedia()
+        print(f"[INFO] Retrieved {len(nasdaq_list)} NASDAQ-100 tickers.")
+        _save_cached_nasdaq_tickers(nasdaq_list, nasdaq_name_map)
     except RuntimeError as exc:
-        print(f"[WARN] Could not fetch NASDAQ tickers: {exc}")
-        print("[WARN] Continuing with S&P 500 universe only.")
-        nasdaq_list, nasdaq_name_map = [], {}
+        print(f"[WARN] Could not fetch NASDAQ-100 tickers: {exc}")
+        if cached_nasdaq:
+            print(
+                f"[INFO] Using {len(cached_nasdaq)} cached NASDAQ tickers from "
+                f"{NASDAQ_CACHE_PATH}"
+            )
+            nasdaq_list, nasdaq_name_map = cached_nasdaq, cached_nasdaq_names
+        else:
+            print("[WARN] Continuing with S&P 500 universe only.")
+            nasdaq_list, nasdaq_name_map = [], {}
 
     tickers_by_index: Dict[str, Set[str]] = {
         "sp500": {t for t in sp500_list if t},
@@ -574,7 +610,9 @@ def main() -> None:
     nasdaq = index_tickers["nasdaq"]
 
     all_universe: Set[str] = sp500.union(nasdaq)
-    print(f"Total unique tickers in universe (S&P500 + NASDAQ): {len(all_universe)}")
+    print(
+        f"Total unique tickers in universe (S&P500 + NASDAQ-100): {len(all_universe)}"
+    )
 
     latest_closes: pd.DataFrame = get_latest_closes_for_universe(
         all_tickers=all_universe,
