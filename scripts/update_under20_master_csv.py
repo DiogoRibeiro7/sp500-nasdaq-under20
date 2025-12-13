@@ -1,12 +1,13 @@
 """
 Incrementally update a single CSV with daily history of all
-S&P500 + NASDAQ (when available) stocks that were < 20 USD on "yesterday".
+S&P500 + NASDAQ (when available) stocks that were under a configurable
+price cap on "yesterday".
 
 - Uses helper functions from scripts.under20_stocks
 - Maintains a single CSV file at data/under20_history.csv
 - On each run:
     1. Compute "yesterday" (UTC).
-    2. Find all tickers with last close < 20 USD on or before yesterday.
+    2. Find all tickers with last close < MAX_PRICE on or before yesterday.
     3. Download 1 year of daily history for those tickers.
     4. Fetch human-readable company names from yfinance.
     5. Append missing rows (with names) to the master CSV (no duplicates).
@@ -14,6 +15,7 @@ S&P500 + NASDAQ (when available) stocks that were < 20 USD on "yesterday".
 
 from __future__ import annotations
 
+import argparse
 import datetime as dt
 from pathlib import Path
 from typing import Dict, List
@@ -22,6 +24,7 @@ import pandas as pd
 import yfinance as yf
 
 from under20_stocks import (
+    BATCH_SIZE,
     HISTORY_PERIOD,
     MAX_PRICE,
     download_history_for_tickers,
@@ -263,7 +266,11 @@ def _attach_names_to_rows(
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:
+def main(
+    max_price: float = MAX_PRICE,
+    history_period: str = HISTORY_PERIOD,
+    batch_size: int = BATCH_SIZE,
+) -> None:
     """
     Main incremental update pipeline.
 
@@ -277,9 +284,14 @@ def main() -> None:
     6. Fetch ticker names from yfinance.
     7. Convert to flat DataFrame, attach names, and merge into master CSV.
     """
+    if max_price <= 0:
+        raise ValueError("max_price must be positive.")
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive.")
+
     as_of_date: dt.date = get_yesterday_date()
     print(f"[INFO] Using target date (yesterday): {as_of_date.isoformat()}")
-    print(f"[INFO] History period: {HISTORY_PERIOD}, max price: {MAX_PRICE} USD")
+    print(f"[INFO] History period: {history_period}, max price: {max_price} USD")
 
     tickers_by_index, ticker_name_map = get_index_tickers_and_names()
     sp500 = tickers_by_index["sp500"]
@@ -287,19 +299,20 @@ def main() -> None:
 
     all_universe = sp500.union(nasdaq)
     print(f"[INFO] Total unique tickers in universe: {len(all_universe)}")
-    
+
     latest_closes = get_latest_closes_for_universe(
         all_tickers=all_universe,
         target_date=as_of_date,
+        batch_size=batch_size,
     )
     print(f"[INFO] Got latest closes for {latest_closes['ticker'].nunique()} tickers.")
 
     selected_tickers = select_tickers_below_price(
         latest_closes=latest_closes,
-        max_price=MAX_PRICE,
+        max_price=max_price,
     )
     print(
-        f"[INFO] Tickers with close < {MAX_PRICE} USD on or before {as_of_date}: "
+        f"[INFO] Tickers with close < {max_price} USD on or before {as_of_date}: "
         f"{len(selected_tickers)}"
     )
 
@@ -310,7 +323,8 @@ def main() -> None:
     # Download historical OHLCV data
     history = download_history_for_tickers(
         tickers=selected_tickers,
-        period=HISTORY_PERIOD,
+        period=history_period,
+        batch_size=batch_size,
     )
 
     if not history:
@@ -354,5 +368,41 @@ def main() -> None:
     print(f"[INFO] Master CSV updated at: {MASTER_CSV_PATH}")
 
 
+def parse_args() -> argparse.Namespace:
+    """
+    Parse CLI arguments for the master CSV updater.
+    """
+    parser = argparse.ArgumentParser(
+        description=(
+            "Incrementally update the consolidated CSV of stocks that traded "
+            "below a target price on the last trading day."
+        )
+    )
+    parser.add_argument(
+        "--max-price",
+        type=float,
+        default=MAX_PRICE,
+        help="Close price ceiling (USD). Default: %(default)s.",
+    )
+    parser.add_argument(
+        "--history-period",
+        type=str,
+        default=HISTORY_PERIOD,
+        help="yfinance period string for historical downloads. Default: %(default)s.",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=BATCH_SIZE,
+        help="Tickers per yfinance batch request. Default: %(default)s.",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    main(
+        max_price=args.max_price,
+        history_period=args.history_period,
+        batch_size=args.batch_size,
+    )

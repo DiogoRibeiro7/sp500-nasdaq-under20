@@ -1,6 +1,7 @@
 """
-Download NASDAQ-100 + S&P 500 stocks that were below a given price threshold
-on the last trading day (“yesterday”) and save their last year of history.
+Download NASDAQ-100 + S&P 500 stocks that were below a configurable price
+threshold on the last trading day ("yesterday") and save their last year of
+history.
 
 Requirements:
     pip install yfinance pandas
@@ -8,12 +9,14 @@ Requirements:
 Notes:
 - Uses yfinance built-in helpers for S&P500 and NASDAQ tickers.
 - Filters tickers by close price < MAX_PRICE on the latest available date
-  up to target_date (usually yesterday).
+  up to target_date (usually yesterday). The default max price can be
+  overridden via CLI arguments.
 - Saves one CSV per ticker with 1 year of daily OHLCV data.
 """
 
 from __future__ import annotations
 
+import argparse
 import datetime as dt
 from pathlib import Path
 from io import StringIO
@@ -29,7 +32,7 @@ NASDAQ_CACHE_PATH = Path("data") / "nasdaq_tickers.csv"
 # ----------------------------- Configuration ---------------------------------
 
 
-MAX_PRICE: float = 20.0
+MAX_PRICE: float = 30.0
 # Number of tickers per batch when calling yf.download
 BATCH_SIZE: int = 150
 # Directory where we will save all CSV files
@@ -590,7 +593,12 @@ def save_history_to_csv(
 # ------------------------------- Main script ---------------------------------
 
 
-def main() -> None:
+def main(
+    max_price: float = MAX_PRICE,
+    history_period: str = HISTORY_PERIOD,
+    output_dir: Path = OUTPUT_DIR,
+    batch_size: int = BATCH_SIZE,
+) -> None:
     """
     Main entrypoint.
 
@@ -605,6 +613,11 @@ def main() -> None:
     as_of_date: dt.date = get_yesterday_date()
     print(f"Using target date (yesterday): {as_of_date.isoformat()}")
 
+    if max_price <= 0:
+        raise ValueError("max_price must be positive.")
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive.")
+
     index_tickers = get_index_tickers()
     sp500 = index_tickers["sp500"]
     nasdaq = index_tickers["nasdaq"]
@@ -617,17 +630,17 @@ def main() -> None:
     latest_closes: pd.DataFrame = get_latest_closes_for_universe(
         all_tickers=all_universe,
         target_date=as_of_date,
-        batch_size=BATCH_SIZE,
+        batch_size=batch_size,
     )
 
     print(f"Got latest closes for {latest_closes['ticker'].nunique()} tickers.")
 
     selected_tickers: List[str] = select_tickers_below_price(
         latest_closes=latest_closes,
-        max_price=MAX_PRICE,
+        max_price=max_price,
     )
     print(
-        f"Number of tickers with close < {MAX_PRICE} USD on or before {as_of_date}: "
+        f"Number of tickers with close < {max_price} USD on or before {as_of_date}: "
         f"{len(selected_tickers)}"
     )
 
@@ -637,8 +650,8 @@ def main() -> None:
 
     history: Dict[str, pd.DataFrame] = download_history_for_tickers(
         tickers=selected_tickers,
-        period=HISTORY_PERIOD,
-        batch_size=BATCH_SIZE,
+        period=history_period,
+        batch_size=batch_size,
     )
 
     if not history:
@@ -647,12 +660,58 @@ def main() -> None:
 
     save_history_to_csv(
         history=history,
-        output_dir=OUTPUT_DIR,
+        output_dir=output_dir,
         as_of_date=as_of_date,
     )
 
     print("Done.")
 
 
+def parse_args() -> argparse.Namespace:
+    """
+    Build and parse CLI arguments.
+    """
+    parser = argparse.ArgumentParser(
+        description=(
+            "Download S&P 500 + NASDAQ-100 stocks below a target price and "
+            "store one year of daily history per ticker."
+        )
+    )
+    parser.add_argument(
+        "--max-price",
+        type=float,
+        default=MAX_PRICE,
+        help=(
+            "Maximum close price (USD) a ticker must be under. "
+            "Default: %(default)s."
+        ),
+    )
+    parser.add_argument(
+        "--history-period",
+        type=str,
+        default=HISTORY_PERIOD,
+        help="yfinance period string for history downloads. Default: %(default)s.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=OUTPUT_DIR,
+        help="Directory to store CSVs. Default: %(default)s.",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=BATCH_SIZE,
+        help="Number of tickers per yfinance batch request. Default: %(default)s.",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    main(
+        max_price=args.max_price,
+        history_period=args.history_period,
+        output_dir=args.output_dir,
+        batch_size=args.batch_size,
+    )
