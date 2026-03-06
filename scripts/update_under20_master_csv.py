@@ -17,13 +17,28 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import sys
 from pathlib import Path
 from typing import Dict, List
 
 import pandas as pd
 import yfinance as yf
 
-from under20_stocks import (
+# ---------------------------------------------------------------------------
+# Path fix: ensure this script can import from its own directory regardless
+# of the working directory from which it is invoked.
+#
+# The GitHub Actions workflow runs:
+#     python scripts/update_under20_master_csv.py
+# from the repo root, so `scripts/` is NOT on sys.path by default.
+# Inserting the directory that contains this file guarantees the sibling
+# module `under20_stocks` is always importable.
+# ---------------------------------------------------------------------------
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from under20_stocks import (  # noqa: E402  (import not at top of file)
     BATCH_SIZE,
     HISTORY_PERIOD,
     MAX_PRICE,
@@ -406,3 +421,4 @@ if __name__ == "__main__":
         history_period=args.history_period,
         batch_size=args.batch_size,
     )
+
