@@ -75,7 +75,9 @@ ignore = [
 # to ensure a single failed ticker never aborts the whole batch.
 # E402 (module-level import not at top) is needed in update_under20_master_csv.py
 # after the sys.path insertion block.
-per-file-ignores = { "scripts/update_under20_master_csv.py" = ["E402"], "scripts/under20_stocks.py" = ["BLE001"], "scripts/update_under20_master_csv.py" = ["BLE001", "E402"] }
+[tool.ruff.lint.per-file-ignores]
+"scripts/under20_stocks.py"            = ["BLE001"]
+"scripts/update_under20_master_csv.py" = ["BLE001", "E402"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["config", "log_config", "schemas", "under20_stocks", "update_under20_master_csv"]
