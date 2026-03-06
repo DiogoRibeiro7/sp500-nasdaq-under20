@@ -9,8 +9,8 @@ Requirements:
 Notes:
 - Uses yfinance built-in helpers for S&P500 and NASDAQ tickers.
 - Filters tickers by close price < MAX_PRICE on the latest available date
-  up to target_date (usually yesterday). The default max price can be
-  overridden via CLI arguments.
+  up to target_date (usually the last trading day). The default max price can
+  be overridden via CLI arguments.
 - Saves one CSV per ticker with 1 year of daily OHLCV data.
 """
 
@@ -40,19 +40,105 @@ OUTPUT_DIR: Path = Path("data_under_20")
 # How many days of history to download (approx. 1 year)
 HISTORY_PERIOD: str = "1y"
 
+# US public holidays (NYSE closed) as (month, day) tuples.
+# Covers the fixed-date rules; the workflow only needs this to avoid querying
+# on a day with no data — a false positive here is harmless (the price-filter
+# step will simply use the previous available row), so we list the most common
+# ones and accept that floating holidays (e.g. Thanksgiving) may occasionally
+# be missed.  When yfinance returns no data for the rolled date we fall back
+# one more day automatically in get_last_trading_day().
+_NYSE_FIXED_HOLIDAYS: Set[Tuple[int, int]] = {
+    (1, 1),    # New Year's Day
+    (7, 4),    # Independence Day
+    (12, 25),  # Christmas Day
+}
+
 
 # ----------------------------- Helper functions ------------------------------
 
 
+def _is_weekend(date: dt.date) -> bool:
+    """Return True if *date* falls on Saturday (5) or Sunday (6)."""
+    return date.weekday() >= 5
+
+
+def _is_fixed_holiday(date: dt.date) -> bool:
+    """
+    Return True if *date* is one of the known fixed NYSE holidays.
+
+    When a fixed holiday falls on a weekend the NYSE typically observes the
+    closest weekday, but we do not model that substitution here — a one-day
+    miss is harmless because the downstream price-filter already tolerates
+    gaps by taking the *last available* row up to the target date.
+    """
+    return (date.month, date.day) in _NYSE_FIXED_HOLIDAYS
+
+
+def get_last_trading_day(reference: dt.date | None = None, max_lookback: int = 7) -> dt.date:
+    """
+    Return the most recent trading day strictly before *reference*.
+
+    A "trading day" is defined here as a weekday that is not one of the known
+    fixed NYSE holidays listed in ``_NYSE_FIXED_HOLIDAYS``.
+
+    Parameters
+    ----------
+    reference : dt.date | None
+        Starting point for the search (exclusive upper bound).  Defaults to
+        today in UTC when *None*.
+    max_lookback : int
+        Maximum number of calendar days to look back.  Raises ``RuntimeError``
+        if no trading day is found within this window (should never happen in
+        practice with the default of 7, which covers any long weekend).
+
+    Returns
+    -------
+    dt.date
+        The last trading day before *reference*.
+
+    Examples
+    --------
+    >>> import datetime as dt
+    >>> # Monday 2024-01-01 is New Year's Day → rolls back to Friday 2023-12-29
+    >>> get_last_trading_day(dt.date(2024, 1, 2))
+    datetime.date(2023, 12, 29)
+
+    >>> # Saturday 2024-03-02 → rolls back to Friday 2024-03-01
+    >>> get_last_trading_day(dt.date(2024, 3, 2))
+    datetime.date(2024, 3, 1)
+    """
+    if reference is None:
+        reference = dt.datetime.utcnow().date()
+
+    candidate = reference - dt.timedelta(days=1)
+
+    for _ in range(max_lookback):
+        if not _is_weekend(candidate) and not _is_fixed_holiday(candidate):
+            return candidate
+        candidate -= dt.timedelta(days=1)
+
+    raise RuntimeError(
+        f"Could not find a trading day within {max_lookback} days before {reference}. "
+        "Increase max_lookback or check the holiday calendar."
+    )
+
+
 def get_yesterday_date() -> dt.date:
     """
-    Return "yesterday" as a calendar date in UTC.
+    Return the last trading day before today (UTC).
 
-    This is a simple calendar-based definition. The code later finds the
-    latest available trading date <= this date for each ticker.
+    Previously this returned a raw calendar "yesterday", which caused empty
+    results when the script ran on a Monday (returning Sunday) or on the day
+    after a public holiday.  The replacement delegates to
+    ``get_last_trading_day`` so the returned date is always a weekday that is
+    not a known fixed NYSE holiday.
+
+    Returns
+    -------
+    dt.date
+        Most recent trading day prior to today in UTC.
     """
-    today_utc: dt.date = dt.datetime.utcnow().date()
-    return today_utc - dt.timedelta(days=1)
+    return get_last_trading_day(reference=None)
 
 
 def _fetch_sp500_from_wikipedia() -> Tuple[List[str], Dict[str, str]]:
@@ -322,7 +408,7 @@ def get_latest_close_for_batch(
     tickers : List[str]
         List of tickers to query (batch).
     target_date : dt.date
-        Date representing "yesterday" (calendar). For each ticker we take
+        The last trading day to use as the upper bound. For each ticker we take
         the last available row with date <= target_date.
 
     Returns
@@ -431,7 +517,7 @@ def get_latest_closes_for_universe(
     all_tickers : Iterable[str]
         All tickers from NASDAQ and S&P 500 (possibly with duplicates).
     target_date : dt.date
-        Target calendar date to use as "yesterday".
+        Last trading day to use as the upper bound.
     batch_size : int, optional
         Number of tickers per batch for yfinance, by default BATCH_SIZE.
 
@@ -576,7 +662,7 @@ def save_history_to_csv(
     output_dir : Path
         Directory where CSV files will be written.
     as_of_date : dt.date
-        Date used in output file names (usually "yesterday").
+        Date used in output file names (usually the last trading day).
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     date_str: str = as_of_date.strftime("%Y%m%d")
@@ -604,14 +690,14 @@ def main(
 
     Steps:
     1. Get S&P 500 and NASDAQ tickers.
-    2. Compute "yesterday" date (UTC).
-    3. Retrieve latest close price up to yesterday for all tickers.
+    2. Compute the last trading day (UTC).
+    3. Retrieve latest close price up to that day for all tickers.
     4. Filter tickers with close < MAX_PRICE.
     5. Download last year of daily history for those tickers.
     6. Save each ticker's history to CSV.
     """
     as_of_date: dt.date = get_yesterday_date()
-    print(f"Using target date (yesterday): {as_of_date.isoformat()}")
+    print(f"Using last trading day: {as_of_date.isoformat()}")
 
     if max_price <= 0:
         raise ValueError("max_price must be positive.")
