@@ -1,17 +1,16 @@
 """
 Incrementally update a single CSV with daily history of all
-S&P500 + NASDAQ (when available) stocks that were under a configurable
-price cap on the last trading day.
+S&P 500 + NASDAQ-100 stocks that were under a configurable price cap on
+the last trading day.
 
-- Uses helper functions from scripts.under20_stocks
-- Maintains a single CSV file at data/under20_history.csv
-- On each run:
+On each run:
     1. Compute the last trading day (UTC).
     2. Find all tickers with last close < MAX_PRICE on or before that day.
     3. Download 1 year of daily history for those tickers.
     4. Resolve human-readable company names (Wikipedia first, yfinance fallback).
     5. Validate the merged DataFrame against the master CSV schema.
-    6. Append missing rows (with names) to the master CSV (no duplicates).
+    6. Write the updated master CSV.
+    7. Append a row to the pipeline run log.
 """
 
 from __future__ import annotations
@@ -27,19 +26,25 @@ import pandera.errors
 import yfinance as yf
 
 # ---------------------------------------------------------------------------
-# Path fix: ensure this script can import from its own directory regardless
-# of the working directory from which it is invoked.
+# Path fix — must come before any local imports so the scripts/ directory is
+# on sys.path when running as  python scripts/update_under20_master_csv.py
+# from the repository root.
 # ---------------------------------------------------------------------------
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from log_config import get_logger  # noqa: E402
-from schemas import validate_latest_closes, validate_master_csv  # noqa: E402
-from under20_stocks import (  # noqa: E402
+from config import (  # noqa: E402
     BATCH_SIZE,
     HISTORY_PERIOD,
+    MASTER_CSV_PATH,
     MAX_PRICE,
+    NAME_BATCH_SIZE,
+)
+from log_config import get_logger  # noqa: E402
+from run_logger import log_run  # noqa: E402
+from schemas import validate_latest_closes, validate_master_csv  # noqa: E402
+from under20_stocks import (  # noqa: E402
     download_history_for_tickers,
     get_index_tickers_and_names,
     get_latest_closes_for_universe,
@@ -48,9 +53,6 @@ from under20_stocks import (  # noqa: E402
 )
 
 log = get_logger(__name__)
-
-MASTER_CSV_PATH: Path = Path("data") / "under20_history.csv"
-_NAME_BATCH_SIZE: int = 50
 
 
 # ---------------------------------------------------------------------------
@@ -64,7 +66,7 @@ def _build_new_rows_dataframe(
     """
     Convert a dict[ticker -> DataFrame] into a flat long-format DataFrame.
 
-    Columns: Date, Ticker, Open, High, Low, Close, Adj Close, Volume
+    Columns: Date, Ticker, Open, High, Low, Close, Adj Close, Volume.
     The Name column is NOT added here; it is merged later.
     """
     records: List[pd.DataFrame] = []
@@ -78,17 +80,13 @@ def _build_new_rows_dataframe(
         df_local.reset_index(inplace=True)
         df_local.rename(columns={"index": "Date"}, inplace=True)
 
-        rename_map = {
-            "Adj_Close": "Adj Close",
-            "adjclose": "Adj Close",
-        }
-        for old, new in rename_map.items():
+        # Normalise column names across yfinance versions
+        for old, new in {"Adj_Close": "Adj Close", "adjclose": "Adj Close"}.items():
             if old in df_local.columns and new not in df_local.columns:
                 df_local.rename(columns={old: new}, inplace=True)
 
-        required_cols = ["Date", "Open", "High", "Low", "Close", "Adj Close", "Volume"]
-        cols_to_keep = [c for c in required_cols if c in df_local.columns]
-        df_local = df_local[cols_to_keep]
+        wanted = ["Date", "Open", "High", "Low", "Close", "Adj Close", "Volume"]
+        df_local = df_local[[c for c in wanted if c in df_local.columns]]
         df_local["Ticker"] = ticker
         records.append(df_local)
 
@@ -101,26 +99,24 @@ def _build_new_rows_dataframe(
 
 
 def _load_existing_master() -> pd.DataFrame:
-    """Load existing master CSV, or return an empty DataFrame with the correct schema."""
+    """Load the master CSV, or return an empty DataFrame with the correct schema."""
     if not MASTER_CSV_PATH.exists():
         return pd.DataFrame(
-            columns=["Date", "Ticker", "Name", "Open", "High", "Low", "Close", "Adj Close", "Volume"]
+            columns=["Date", "Ticker", "Name", "Open", "High", "Low",
+                     "Close", "Adj Close", "Volume"]
         )
 
     df = pd.read_csv(MASTER_CSV_PATH, parse_dates=["Date"])
 
     if "Name" not in df.columns:
-        log.debug("Existing master CSV has no Name column — adding for backwards compatibility.")
+        log.debug("Master CSV has no Name column — adding for backwards compatibility.")
         df["Name"] = pd.NA
 
-    # Validate the file we just loaded so we catch corruption or manual edits
-    # that broke the schema before we start appending new data to it.
     try:
         df = validate_master_csv(df)
     except pandera.errors.SchemaErrors as exc:
         log.error(
-            "Existing master CSV failed schema validation — it may be corrupt "
-            "or was edited manually.\n%s",
+            "Existing master CSV failed schema validation — may be corrupt.\n%s",
             exc.failure_cases.to_string(index=False),
         )
         raise
@@ -143,11 +139,15 @@ def _merge_and_deduplicate(
     combined["Date"] = pd.to_datetime(combined["Date"])
 
     has_name = combined["Name"].astype(str).str.strip().ne("")
-    combined = combined.assign(_has_name=has_name)
-    combined = combined.sort_values(by=["Date", "Ticker", "_has_name"])
-    combined = combined.drop_duplicates(subset=["Date", "Ticker"], keep="last")
-    combined = combined.drop(columns="_has_name")
-    combined = combined.sort_values(by=["Date", "Ticker"]).reset_index(drop=True)
+    combined = (
+        combined
+        .assign(_has_name=has_name)
+        .sort_values(["Date", "Ticker", "_has_name"])
+        .drop_duplicates(subset=["Date", "Ticker"], keep="last")
+        .drop(columns="_has_name")
+        .sort_values(["Date", "Ticker"])
+        .reset_index(drop=True)
+    )
     return combined
 
 
@@ -158,17 +158,15 @@ def _merge_and_deduplicate(
 
 def _fetch_names_from_yfinance(
     tickers: List[str],
-    batch_size: int = _NAME_BATCH_SIZE,
+    batch_size: int = NAME_BATCH_SIZE,
 ) -> Dict[str, str]:
     """Fetch company names from yfinance using batched parallel requests."""
     names: Dict[str, str] = {}
 
     for i in range(0, len(tickers), batch_size):
         batch = tickers[i : i + batch_size]
-        ticker_str = " ".join(batch)
-
         try:
-            tickers_obj = yf.Tickers(ticker_str)
+            tickers_obj = yf.Tickers(" ".join(batch))
         except Exception as exc:  # noqa: BLE001
             log.warning("yf.Tickers() failed for batch at index %d: %s", i, exc)
             for t in batch:
@@ -179,7 +177,9 @@ def _fetch_names_from_yfinance(
             try:
                 info: dict = tickers_obj.tickers[symbol].info
                 name = info.get("shortName") or info.get("longName")
-                names[symbol] = name.strip() if isinstance(name, str) and name.strip() else symbol
+                names[symbol] = (
+                    name.strip() if isinstance(name, str) and name.strip() else symbol
+                )
             except Exception as exc:  # noqa: BLE001
                 log.warning("Could not fetch name for %s: %s", symbol, exc)
                 names[symbol] = symbol
@@ -190,15 +190,12 @@ def _fetch_names_from_yfinance(
 def resolve_ticker_names(
     tickers: List[str],
     known_names: Dict[str, str],
-    batch_size: int = _NAME_BATCH_SIZE,
+    batch_size: int = NAME_BATCH_SIZE,
 ) -> Dict[str, str]:
     """
     Build a complete ticker -> name mapping.
 
-    Priority:
-    1. Wikipedia names from *known_names* (no network call).
-    2. Batched yfinance lookup for any ticker not covered by Wikipedia.
-    3. Ticker symbol itself as a last resort.
+    Priority: Wikipedia names → batched yfinance → ticker symbol itself.
     """
     result: Dict[str, str] = {}
     needs_lookup: List[str] = []
@@ -212,11 +209,10 @@ def resolve_ticker_names(
 
     if needs_lookup:
         log.info(
-            "Fetching names from yfinance for %d tickers not covered by Wikipedia.",
+            "Fetching names from yfinance for %d tickers not in Wikipedia data.",
             len(needs_lookup),
         )
-        yf_names = _fetch_names_from_yfinance(needs_lookup, batch_size=batch_size)
-        result.update(yf_names)
+        result.update(_fetch_names_from_yfinance(needs_lookup, batch_size=batch_size))
     else:
         log.info("All ticker names resolved from Wikipedia — skipping yfinance name fetch.")
 
@@ -232,7 +228,6 @@ def _attach_names_to_rows(
         rows = rows.copy()
         rows["Name"] = pd.Series(dtype="string")
         return rows
-
     rows = rows.copy()
     rows["Name"] = rows["Ticker"].map(ticker_names).fillna(rows["Ticker"])
     return rows
@@ -253,13 +248,14 @@ def main(
 
     Steps
     -----
-    1. Compute the last trading day (UTC).
-    2. Gather S&P 500 and NASDAQ tickers + Wikipedia names.
-    3. Retrieve and validate latest close prices.
-    4. Select tickers with close < max_price.
-    5. Download 1 year of daily history for selected tickers.
-    6. Resolve company names (Wikipedia first, batched yfinance fallback).
-    7. Merge into master CSV, validate, and write.
+    1.  Compute the last trading day (UTC).
+    2.  Gather S&P 500 and NASDAQ tickers + Wikipedia names.
+    3.  Retrieve and validate latest close prices.
+    4.  Select tickers with close < max_price.
+    5.  Download 1 year of daily history for selected tickers.
+    6.  Resolve company names (Wikipedia first, batched yfinance fallback).
+    7.  Merge into master CSV, validate, and write.
+    8.  Append a row to the pipeline run log.
     """
     if max_price <= 0:
         raise ValueError("max_price must be positive.")
@@ -267,12 +263,13 @@ def main(
         raise ValueError("batch_size must be positive.")
 
     as_of_date: dt.date = get_yesterday_date()
-    log.info("Using last trading day: %s", as_of_date.isoformat())
-    log.info("History period: %s  |  max price: %.2f USD", history_period, max_price)
+    log.info("Last trading day : %s", as_of_date.isoformat())
+    log.info("History period   : %s  |  max price: %.2f USD", history_period, max_price)
 
     tickers_by_index, ticker_name_map = get_index_tickers_and_names()
     all_universe = tickers_by_index["sp500"].union(tickers_by_index["nasdaq"])
-    log.info("Total unique tickers in universe: %d", len(all_universe))
+    universe_size = len(all_universe)
+    log.info("Universe size    : %d tickers", universe_size)
 
     latest_closes = get_latest_closes_for_universe(
         all_tickers=all_universe,
@@ -280,31 +277,26 @@ def main(
         batch_size=batch_size,
     )
 
-    # Validate closes before filtering — catches yfinance dtype regressions early.
     try:
         latest_closes = validate_latest_closes(latest_closes)
     except pandera.errors.SchemaErrors as exc:
-        log.error(
-            "Latest closes failed schema validation:\n%s",
-            exc.failure_cases.to_string(index=False),
-        )
+        log.error("Latest closes failed validation:\n%s",
+                  exc.failure_cases.to_string(index=False))
+        log_run(as_of_date, universe_size, 0, 0, 0, max_price, "validation_error")
         raise
 
-    log.info("Got latest closes for %d tickers.", latest_closes["ticker"].nunique())
+    log.info("Latest closes    : %d tickers", latest_closes["ticker"].nunique())
 
     selected_tickers = select_tickers_below_price(
         latest_closes=latest_closes,
         max_price=max_price,
     )
-    log.info(
-        "Tickers with close < %.2f USD on or before %s: %d",
-        max_price,
-        as_of_date,
-        len(selected_tickers),
-    )
+    tickers_found = len(selected_tickers)
+    log.info("Tickers < %.2f USD on %s : %d", max_price, as_of_date, tickers_found)
 
     if not selected_tickers:
         log.warning("No tickers met the price criterion. Nothing to update.")
+        log_run(as_of_date, universe_size, 0, 0, 0, max_price, "no_tickers")
         return
 
     history = download_history_for_tickers(
@@ -315,6 +307,7 @@ def main(
 
     if not history:
         log.warning("No historical data downloaded. Nothing to update.")
+        log_run(as_of_date, universe_size, tickers_found, 0, 0, max_price, "no_history")
         return
 
     new_rows = _build_new_rows_dataframe(history)
@@ -323,36 +316,49 @@ def main(
     ticker_names = resolve_ticker_names(
         tickers=selected_tickers,
         known_names=ticker_name_map,
-        batch_size=_NAME_BATCH_SIZE,
     )
     new_rows = _attach_names_to_rows(new_rows, ticker_names)
 
     existing = _load_existing_master()
-    log.info("Existing master rows: %d", len(existing))
+    existing_count = len(existing)
+    log.info("Existing master rows: %d", existing_count)
 
     updated = _merge_and_deduplicate(existing, new_rows)
-    log.info("Updated master rows after dedupe: %d", len(updated))
+    new_rows_added = len(updated) - existing_count
+    log.info("Rows added this run : %d", new_rows_added)
+    log.info("Total master rows   : %d", len(updated))
 
     MASTER_CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-    desired_order = ["Date", "Ticker", "Name", "Open", "High", "Low", "Close", "Adj Close", "Volume"]
-    cols_in_df = [c for c in desired_order if c in updated.columns]
-    updated = updated[cols_in_df]
+    desired_order = [
+        "Date", "Ticker", "Name", "Open", "High", "Low",
+        "Close", "Adj Close", "Volume",
+    ]
+    updated = updated[[c for c in desired_order if c in updated.columns]]
 
-    # Final validation before writing — the last line of defence against
-    # writing a malformed CSV that would corrupt future incremental runs.
     try:
         updated = validate_master_csv(updated)
     except pandera.errors.SchemaErrors as exc:
         log.error(
-            "Updated master DataFrame failed schema validation — aborting write "
-            "to protect the existing CSV.\n%s",
+            "Updated DataFrame failed validation — aborting write.\n%s",
             exc.failure_cases.to_string(index=False),
         )
+        log_run(as_of_date, universe_size, tickers_found,
+                new_rows_added, len(updated), max_price, "validation_error")
         raise
 
     updated.to_csv(MASTER_CSV_PATH, index=False)
-    log.info("Master CSV updated at: %s", MASTER_CSV_PATH)
+    log.info("Master CSV written  : %s", MASTER_CSV_PATH)
+
+    log_run(
+        as_of_date=as_of_date,
+        universe_size=universe_size,
+        tickers_found=tickers_found,
+        new_rows_added=new_rows_added,
+        total_rows=len(updated),
+        max_price=max_price,
+        status="ok",
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -362,9 +368,12 @@ def parse_args() -> argparse.Namespace:
             "below a target price on the last trading day."
         )
     )
-    parser.add_argument("--max-price", type=float, default=MAX_PRICE)
-    parser.add_argument("--history-period", type=str, default=HISTORY_PERIOD)
-    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
+    parser.add_argument("--max-price", type=float, default=MAX_PRICE,
+                        help="Close price ceiling in USD. Default: %(default)s.")
+    parser.add_argument("--history-period", type=str, default=HISTORY_PERIOD,
+                        help="yfinance period string. Default: %(default)s.")
+    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE,
+                        help="Tickers per yfinance batch request. Default: %(default)s.")
     return parser.parse_args()
 
 
