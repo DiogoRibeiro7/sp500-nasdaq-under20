@@ -2,3 +2,4 @@ pandas[lxml]>=2.0
 yfinance>=0.2.66
 lxml>=5
 requests>=2.32
+pandera>=0.18
