@@ -38,8 +38,8 @@ environment.
 
 from __future__ import annotations
 
-import pandera as pa
-from pandera import Column, DataFrameSchema, Check
+import pandera.pandas as pa
+from pandera.pandas import Column, DataFrameSchema, Check
 import pandas as pd
 
 
