@@ -1,16 +1,13 @@
 """
 Download NASDAQ-100 + S&P 500 stocks that were below a configurable price
-threshold on the last trading day ("yesterday") and save their last year of
-history.
+threshold on the last trading day and save their last year of history.
 
 Requirements:
     pip install yfinance pandas
 
 Notes:
-- Uses yfinance built-in helpers for S&P500 and NASDAQ tickers.
 - Filters tickers by close price < MAX_PRICE on the latest available date
-  up to target_date (usually the last trading day). The default max price can
-  be overridden via CLI arguments.
+  up to target_date (usually the last trading day).
 - Saves one CSV per ticker with 1 year of daily OHLCV data.
 """
 
@@ -27,26 +24,19 @@ from requests.exceptions import RequestException, Timeout
 import pandas as pd
 import yfinance as yf
 
+from log_config import get_logger
+
+log = get_logger(__name__)
+
 NASDAQ_CACHE_PATH = Path("data") / "nasdaq_tickers.csv"
 
 # ----------------------------- Configuration ---------------------------------
 
-
 MAX_PRICE: float = 30.0
-# Number of tickers per batch when calling yf.download
 BATCH_SIZE: int = 150
-# Directory where we will save all CSV files
 OUTPUT_DIR: Path = Path("data_under_20")
-# How many days of history to download (approx. 1 year)
 HISTORY_PERIOD: str = "1y"
 
-# US public holidays (NYSE closed) as (month, day) tuples.
-# Covers the fixed-date rules; the workflow only needs this to avoid querying
-# on a day with no data — a false positive here is harmless (the price-filter
-# step will simply use the previous available row), so we list the most common
-# ones and accept that floating holidays (e.g. Thanksgiving) may occasionally
-# be missed.  When yfinance returns no data for the rolled date we fall back
-# one more day automatically in get_last_trading_day().
 _NYSE_FIXED_HOLIDAYS: Set[Tuple[int, int]] = {
     (1, 1),    # New Year's Day
     (7, 4),    # Independence Day
@@ -63,14 +53,7 @@ def _is_weekend(date: dt.date) -> bool:
 
 
 def _is_fixed_holiday(date: dt.date) -> bool:
-    """
-    Return True if *date* is one of the known fixed NYSE holidays.
-
-    When a fixed holiday falls on a weekend the NYSE typically observes the
-    closest weekday, but we do not model that substitution here — a one-day
-    miss is harmless because the downstream price-filter already tolerates
-    gaps by taking the *last available* row up to the target date.
-    """
+    """Return True if *date* is one of the known fixed NYSE holidays."""
     return (date.month, date.day) in _NYSE_FIXED_HOLIDAYS
 
 
@@ -78,34 +61,16 @@ def get_last_trading_day(reference: dt.date | None = None, max_lookback: int = 7
     """
     Return the most recent trading day strictly before *reference*.
 
-    A "trading day" is defined here as a weekday that is not one of the known
-    fixed NYSE holidays listed in ``_NYSE_FIXED_HOLIDAYS``.
-
     Parameters
     ----------
     reference : dt.date | None
-        Starting point for the search (exclusive upper bound).  Defaults to
-        today in UTC when *None*.
+        Starting point (exclusive upper bound). Defaults to today UTC.
     max_lookback : int
-        Maximum number of calendar days to look back.  Raises ``RuntimeError``
-        if no trading day is found within this window (should never happen in
-        practice with the default of 7, which covers any long weekend).
+        Maximum calendar days to look back before raising RuntimeError.
 
     Returns
     -------
     dt.date
-        The last trading day before *reference*.
-
-    Examples
-    --------
-    >>> import datetime as dt
-    >>> # Monday 2024-01-01 is New Year's Day → rolls back to Friday 2023-12-29
-    >>> get_last_trading_day(dt.date(2024, 1, 2))
-    datetime.date(2023, 12, 29)
-
-    >>> # Saturday 2024-03-02 → rolls back to Friday 2024-03-01
-    >>> get_last_trading_day(dt.date(2024, 3, 2))
-    datetime.date(2024, 3, 1)
     """
     if reference is None:
         reference = dt.datetime.utcnow().date()
@@ -124,32 +89,12 @@ def get_last_trading_day(reference: dt.date | None = None, max_lookback: int = 7
 
 
 def get_yesterday_date() -> dt.date:
-    """
-    Return the last trading day before today (UTC).
-
-    Previously this returned a raw calendar "yesterday", which caused empty
-    results when the script ran on a Monday (returning Sunday) or on the day
-    after a public holiday.  The replacement delegates to
-    ``get_last_trading_day`` so the returned date is always a weekday that is
-    not a known fixed NYSE holiday.
-
-    Returns
-    -------
-    dt.date
-        Most recent trading day prior to today in UTC.
-    """
+    """Return the last trading day before today (UTC)."""
     return get_last_trading_day(reference=None)
 
 
 def _fetch_sp500_from_wikipedia() -> Tuple[List[str], Dict[str, str]]:
-    """
-    Fetch S&P 500 tickers and company names from Wikipedia.
-
-    Returns
-    -------
-    Tuple[List[str], Dict[str, str]]
-        (list of tickers, mapping ticker -> company name)
-    """
+    """Fetch S&P 500 tickers and company names from Wikipedia."""
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
     headers = {
         "User-Agent": (
@@ -169,39 +114,18 @@ def _fetch_sp500_from_wikipedia() -> Tuple[List[str], Dict[str, str]]:
     df = tables[0]
     if "Symbol" not in df.columns:
         raise RuntimeError("Wikipedia S&P 500 table has no 'Symbol' column.")
-    # Column for name is usually 'Security'
     name_col = "Security" if "Security" in df.columns else None
     if name_col is None:
         raise RuntimeError("Wikipedia S&P 500 table has no 'Security' column for names.")
 
-    symbols = (
-        df["Symbol"]
-        .astype(str)
-        .str.upper()
-        .str.strip()
-        .tolist()
-    )
-    names = (
-        df[name_col]
-        .astype(str)
-        .str.strip()
-        .tolist()
-    )
-
+    symbols = df["Symbol"].astype(str).str.upper().str.strip().tolist()
+    names = df[name_col].astype(str).str.strip().tolist()
     ticker_to_name = {sym: nm for sym, nm in zip(symbols, names)}
     return symbols, ticker_to_name
 
 
 def _load_cached_nasdaq_tickers() -> Tuple[List[str], Dict[str, str]]:
-    """
-    Load cached NASDAQ tickers (and optional names) from NASDAQ_CACHE_PATH.
-
-    Returns
-    -------
-    Tuple[List[str], Dict[str, str]]
-        (list of ticker symbols, mapping ticker -> company name) or empty values
-        if the cache does not exist.
-    """
+    """Load cached NASDAQ tickers from NASDAQ_CACHE_PATH."""
     if not NASDAQ_CACHE_PATH.exists():
         return [], {}
 
@@ -211,23 +135,9 @@ def _load_cached_nasdaq_tickers() -> Tuple[List[str], Dict[str, str]]:
             f"Cached NASDAQ tickers file {NASDAQ_CACHE_PATH} has no 'Symbol' column."
         )
 
-    symbols = (
-        df["Symbol"]
-        .dropna()
-        .astype(str)
-        .str.upper()
-        .str.strip()
-        .tolist()
-    )
-
+    symbols = df["Symbol"].dropna().astype(str).str.upper().str.strip().tolist()
     if "Security Name" in df.columns:
-        names = (
-            df["Security Name"]
-            .fillna("")
-            .astype(str)
-            .str.strip()
-            .tolist()
-        )
+        names = df["Security Name"].fillna("").astype(str).str.strip().tolist()
     else:
         names = symbols
 
@@ -236,31 +146,20 @@ def _load_cached_nasdaq_tickers() -> Tuple[List[str], Dict[str, str]]:
 
 
 def _save_cached_nasdaq_tickers(symbols: List[str], ticker_to_name: Dict[str, str]) -> None:
-    """
-    Persist NASDAQ ticker symbols and names to NASDAQ_CACHE_PATH.
-    """
+    """Persist NASDAQ ticker symbols and names to NASDAQ_CACHE_PATH."""
     if not symbols:
         return
 
     NASDAQ_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    df = pd.DataFrame(
-        {
-            "Symbol": symbols,
-            "Security Name": [ticker_to_name.get(sym, "") for sym in symbols],
-        }
-    )
+    df = pd.DataFrame({
+        "Symbol": symbols,
+        "Security Name": [ticker_to_name.get(sym, "") for sym in symbols],
+    })
     df.to_csv(NASDAQ_CACHE_PATH, index=False)
 
 
 def _fetch_nasdaq100_from_wikipedia() -> Tuple[List[str], Dict[str, str]]:
-    """
-    Fetch NASDAQ-100 tickers and company names from Wikipedia.
-
-    Returns
-    -------
-    Tuple[List[str], Dict[str, str]]
-        (list of tickers, mapping ticker -> company name)
-    """
+    """Fetch NASDAQ-100 tickers and company names from Wikipedia."""
     url = "https://en.wikipedia.org/wiki/Nasdaq-100"
     headers = {
         "User-Agent": (
@@ -297,9 +196,7 @@ def _fetch_nasdaq100_from_wikipedia() -> Tuple[List[str], Dict[str, str]]:
 
     candidate_df = candidate_df[candidate_df["Ticker"].notna()].copy()
     candidate_df["Ticker"] = candidate_df["Ticker"].astype(str).str.upper().str.strip()
-    candidate_df[name_column] = (
-        candidate_df[name_column].fillna("").astype(str).str.strip()
-    )
+    candidate_df[name_column] = candidate_df[name_column].fillna("").astype(str).str.strip()
 
     symbols = candidate_df["Ticker"].tolist()
     names = candidate_df[name_column].tolist()
@@ -308,42 +205,28 @@ def _fetch_nasdaq100_from_wikipedia() -> Tuple[List[str], Dict[str, str]]:
 
 
 def get_index_tickers_and_names() -> Tuple[Dict[str, Set[str]], Dict[str, str]]:
-    """
-    Fetch tickers and company names for S&P 500 and NASDAQ.
-
-    Returns
-    -------
-    Tuple[Dict[str, Set[str]], Dict[str, str]]
-        (
-            {
-              "sp500": {ticker, ...},
-              "nasdaq": {ticker, ...}
-            },
-            {ticker: name, ...}
-        )
-    """
-    # ---- S&P 500 ----
-    print("[INFO] Fetching S&P 500 tickers from Wikipedia...")
+    """Fetch tickers and company names for S&P 500 and NASDAQ-100."""
+    log.info("Fetching S&P 500 tickers from Wikipedia...")
     sp500_list, sp500_name_map = _fetch_sp500_from_wikipedia()
-    print(f"[INFO] Retrieved {len(sp500_list)} S&P 500 tickers.")
+    log.info("Retrieved %d S&P 500 tickers.", len(sp500_list))
 
-    # ---- NASDAQ ----
     cached_nasdaq, cached_nasdaq_names = _load_cached_nasdaq_tickers()
-    print("[INFO] Fetching NASDAQ-100 tickers from Wikipedia...")
+    log.info("Fetching NASDAQ-100 tickers from Wikipedia...")
     try:
         nasdaq_list, nasdaq_name_map = _fetch_nasdaq100_from_wikipedia()
-        print(f"[INFO] Retrieved {len(nasdaq_list)} NASDAQ-100 tickers.")
+        log.info("Retrieved %d NASDAQ-100 tickers.", len(nasdaq_list))
         _save_cached_nasdaq_tickers(nasdaq_list, nasdaq_name_map)
     except RuntimeError as exc:
-        print(f"[WARN] Could not fetch NASDAQ-100 tickers: {exc}")
+        log.warning("Could not fetch NASDAQ-100 tickers: %s", exc)
         if cached_nasdaq:
-            print(
-                f"[INFO] Using {len(cached_nasdaq)} cached NASDAQ tickers from "
-                f"{NASDAQ_CACHE_PATH}"
+            log.info(
+                "Using %d cached NASDAQ tickers from %s",
+                len(cached_nasdaq),
+                NASDAQ_CACHE_PATH,
             )
             nasdaq_list, nasdaq_name_map = cached_nasdaq, cached_nasdaq_names
         else:
-            print("[WARN] Continuing with S&P 500 universe only.")
+            log.warning("Continuing with S&P 500 universe only.")
             nasdaq_list, nasdaq_name_map = [], {}
 
     tickers_by_index: Dict[str, Set[str]] = {
@@ -362,29 +245,13 @@ def get_index_tickers_and_names() -> Tuple[Dict[str, Set[str]], Dict[str, str]]:
 
 
 def get_index_tickers() -> Dict[str, Set[str]]:
-    """
-    Backwards-compatible wrapper that returns only ticker sets per index.
-    """
+    """Backwards-compatible wrapper that returns only ticker sets per index."""
     tickers_by_index, _ = get_index_tickers_and_names()
     return tickers_by_index
 
 
 def chunked(iterable: Iterable[str], size: int) -> Iterable[List[str]]:
-    """
-    Yield successive chunks of the given iterable.
-
-    Parameters
-    ----------
-    iterable : Iterable[str]
-        Iterable of tickers.
-    size : int
-        Maximum chunk size.
-
-    Yields
-    ------
-    List[str]
-        List of tickers in each chunk.
-    """
+    """Yield successive chunks of *iterable* of length at most *size*."""
     chunk: List[str] = []
     for item in iterable:
         chunk.append(item)
@@ -400,30 +267,13 @@ def get_latest_close_for_batch(
     target_date: dt.date,
 ) -> pd.DataFrame:
     """
-    Download up to a few days of data and extract the latest close for each ticker
-    up to target_date.
-
-    Parameters
-    ----------
-    tickers : List[str]
-        List of tickers to query (batch).
-    target_date : dt.date
-        The last trading day to use as the upper bound. For each ticker we take
-        the last available row with date <= target_date.
-
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame with columns ["ticker", "date", "close"], one row per ticker
-        that has at least one observation up to target_date.
+    Download a short window and extract the latest close for each ticker
+    up to *target_date*.
     """
     if not tickers:
         raise ValueError("Ticker list for batch is empty.")
 
-    # We download a small window: last 7 calendar days should cover weekends/holidays
-    # and still include the last trading day before or at target_date.
     start_date: dt.date = target_date - dt.timedelta(days=7)
-    # Use interval=1d; group_by="ticker" yields a column structure per ticker
     data: pd.DataFrame = yf.download(
         tickers=tickers,
         start=start_date.isoformat(),
@@ -435,71 +285,42 @@ def get_latest_close_for_batch(
         progress=False,
     )
 
-    # Handle the case where we requested a single ticker (yfinance shape is different)
     records: List[Dict[str, object]] = []
 
     def _extract_for_single_ticker(
         df_single: pd.DataFrame, ticker: str
     ) -> Optional[Tuple[pd.Timestamp, float]]:
-        """
-        For a single-ticker DataFrame, find the last row with index <= target_date.
-        Returns (date, close) or None if nothing is found.
-        """
         if df_single.empty:
             return None
-
-        # Ensure DateTimeIndex
         df_single = df_single.copy()
         df_single.index = pd.to_datetime(df_single.index)
-
-        # Filter by date <= target_date
         mask = df_single.index.date <= target_date
         df_filtered = df_single.loc[mask]
-
         if df_filtered.empty:
             return None
-
         last_row = df_filtered.iloc[-1]
         last_date = df_filtered.index[-1]
         close_price = float(last_row["Close"])
         return last_date, close_price
 
     if isinstance(data.columns, pd.MultiIndex):
-        # Multi-ticker mode
         for ticker in tickers:
             if ticker not in data.columns.get_level_values(0):
-                # yfinance may fail silently for some symbols
                 continue
             df_single = data[ticker].dropna(how="all")
             result = _extract_for_single_ticker(df_single, ticker)
             if result is not None:
                 last_date, close_price = result
-                records.append(
-                    {
-                        "ticker": ticker,
-                        "date": last_date,
-                        "close": close_price,
-                    }
-                )
+                records.append({"ticker": ticker, "date": last_date, "close": close_price})
     else:
-        # Single-ticker mode
         if len(tickers) != 1:
-            # Defensive check: this should not happen, but better to fail loudly.
-            raise RuntimeError(
-                "Unexpected single-ticker data shape for multiple tickers."
-            )
+            raise RuntimeError("Unexpected single-ticker data shape for multiple tickers.")
         ticker = tickers[0]
         df_single = data.dropna(how="all")
         result = _extract_for_single_ticker(df_single, ticker)
         if result is not None:
             last_date, close_price = result
-            records.append(
-                {
-                    "ticker": ticker,
-                    "date": last_date,
-                    "close": close_price,
-                }
-            )
+            records.append({"ticker": ticker, "date": last_date, "close": close_price})
 
     return pd.DataFrame.from_records(records)
 
@@ -509,24 +330,7 @@ def get_latest_closes_for_universe(
     target_date: dt.date,
     batch_size: int = BATCH_SIZE,
 ) -> pd.DataFrame:
-    """
-    Get the latest close price up to target_date for an entire universe of tickers.
-
-    Parameters
-    ----------
-    all_tickers : Iterable[str]
-        All tickers from NASDAQ and S&P 500 (possibly with duplicates).
-    target_date : dt.date
-        Last trading day to use as the upper bound.
-    batch_size : int, optional
-        Number of tickers per batch for yfinance, by default BATCH_SIZE.
-
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame with columns ["ticker", "date", "close"].
-    """
-    # Deduplicate tickers
+    """Get the latest close price up to *target_date* for all tickers."""
     all_unique_tickers: List[str] = sorted({t for t in all_tickers if t})
 
     all_records: List[pd.DataFrame] = []
@@ -534,8 +338,7 @@ def get_latest_closes_for_universe(
         try:
             batch_df = get_latest_close_for_batch(batch, target_date)
         except Exception as exc:  # noqa: BLE001
-            # For robustness: log / print and continue with next batch
-            print(f"Warning: batch failed for {len(batch)} tickers: {exc}")
+            log.warning("Batch failed for %d tickers: %s", len(batch), exc)
             continue
         if not batch_df.empty:
             all_records.append(batch_df)
@@ -543,36 +346,20 @@ def get_latest_closes_for_universe(
     if not all_records:
         raise RuntimeError("No price data could be retrieved for any ticker.")
 
-    result: pd.DataFrame = pd.concat(all_records, ignore_index=True)
-    return result
+    return pd.concat(all_records, ignore_index=True)
 
 
 def select_tickers_below_price(
     latest_closes: pd.DataFrame,
     max_price: float = MAX_PRICE,
 ) -> List[str]:
-    """
-    Select tickers whose last close is strictly below max_price.
-
-    Parameters
-    ----------
-    latest_closes : pd.DataFrame
-        DataFrame with columns ["ticker", "date", "close"].
-    max_price : float, optional
-        Price threshold, by default MAX_PRICE.
-
-    Returns
-    -------
-    List[str]
-        List of tickers that satisfy close < max_price.
-    """
+    """Return tickers whose last close is strictly below *max_price*."""
     required_cols: Set[str] = {"ticker", "date", "close"}
     if not required_cols.issubset(set(latest_closes.columns)):
         raise ValueError(
             f"latest_closes must contain columns {required_cols}, "
             f"found {set(latest_closes.columns)}"
         )
-
     mask = latest_closes["close"] < max_price
     selected = latest_closes.loc[mask, "ticker"].dropna().unique().tolist()
     return sorted(selected)
@@ -583,23 +370,7 @@ def download_history_for_tickers(
     period: str = HISTORY_PERIOD,
     batch_size: int = BATCH_SIZE,
 ) -> Dict[str, pd.DataFrame]:
-    """
-    Download historical daily data for a list of tickers.
-
-    Parameters
-    ----------
-    tickers : List[str]
-        List of tickers to download.
-    period : str, optional
-        Period argument passed to yfinance (e.g., "1y"), by default HISTORY_PERIOD.
-    batch_size : int, optional
-        Number of tickers per batch for yfinance, by default BATCH_SIZE.
-
-    Returns
-    -------
-    Dict[str, pd.DataFrame]
-        Mapping ticker -> DataFrame with OHLCV history.
-    """
+    """Download historical daily OHLCV data for *tickers*."""
     ticker_to_df: Dict[str, pd.DataFrame] = {}
 
     for batch in chunked(tickers, batch_size):
@@ -614,11 +385,10 @@ def download_history_for_tickers(
                 progress=False,
             )
         except Exception as exc:  # noqa: BLE001
-            print(f"Warning: batch history download failed for {len(batch)} tickers: {exc}")
+            log.warning("Batch history download failed for %d tickers: %s", len(batch), exc)
             continue
 
         if isinstance(data.columns, pd.MultiIndex):
-            # Multi-ticker shape: first level is ticker
             for ticker in batch:
                 if ticker not in data.columns.get_level_values(0):
                     continue
@@ -629,7 +399,6 @@ def download_history_for_tickers(
                 df_single.index = pd.to_datetime(df_single.index)
                 ticker_to_df[ticker] = df_single
         else:
-            # Single ticker shape
             if len(batch) != 1:
                 raise RuntimeError(
                     "Unexpected single-ticker data shape for multiple tickers."
@@ -649,31 +418,16 @@ def save_history_to_csv(
     output_dir: Path,
     as_of_date: dt.date,
 ) -> None:
-    """
-    Save each ticker's history to a separate CSV file.
-
-    File naming convention:
-        {ticker}_history_until_{YYYYMMDD}.csv
-
-    Parameters
-    ----------
-    history : Dict[str, pd.DataFrame]
-        Mapping ticker -> DataFrame with history.
-    output_dir : Path
-        Directory where CSV files will be written.
-    as_of_date : dt.date
-        Date used in output file names (usually the last trading day).
-    """
+    """Save each ticker's history to a separate CSV file."""
     output_dir.mkdir(parents=True, exist_ok=True)
     date_str: str = as_of_date.strftime("%Y%m%d")
 
     for ticker, df in history.items():
-        # Basic sanity check
         if df.empty:
             continue
         file_path: Path = output_dir / f"{ticker}_history_until_{date_str}.csv"
         df.to_csv(file_path, index_label="Date")
-        print(f"Saved history for {ticker} to {file_path}")
+        log.info("Saved history for %s to %s", ticker, file_path)
 
 
 # ------------------------------- Main script ---------------------------------
@@ -685,19 +439,9 @@ def main(
     output_dir: Path = OUTPUT_DIR,
     batch_size: int = BATCH_SIZE,
 ) -> None:
-    """
-    Main entrypoint.
-
-    Steps:
-    1. Get S&P 500 and NASDAQ tickers.
-    2. Compute the last trading day (UTC).
-    3. Retrieve latest close price up to that day for all tickers.
-    4. Filter tickers with close < MAX_PRICE.
-    5. Download last year of daily history for those tickers.
-    6. Save each ticker's history to CSV.
-    """
+    """Main entrypoint."""
     as_of_date: dt.date = get_yesterday_date()
-    print(f"Using last trading day: {as_of_date.isoformat()}")
+    log.info("Using last trading day: %s", as_of_date.isoformat())
 
     if max_price <= 0:
         raise ValueError("max_price must be positive.")
@@ -705,91 +449,53 @@ def main(
         raise ValueError("batch_size must be positive.")
 
     index_tickers = get_index_tickers()
-    sp500 = index_tickers["sp500"]
-    nasdaq = index_tickers["nasdaq"]
+    all_universe: Set[str] = index_tickers["sp500"].union(index_tickers["nasdaq"])
+    log.info("Total unique tickers in universe (S&P500 + NASDAQ-100): %d", len(all_universe))
 
-    all_universe: Set[str] = sp500.union(nasdaq)
-    print(
-        f"Total unique tickers in universe (S&P500 + NASDAQ-100): {len(all_universe)}"
-    )
-
-    latest_closes: pd.DataFrame = get_latest_closes_for_universe(
+    latest_closes = get_latest_closes_for_universe(
         all_tickers=all_universe,
         target_date=as_of_date,
         batch_size=batch_size,
     )
+    log.info("Got latest closes for %d tickers.", latest_closes["ticker"].nunique())
 
-    print(f"Got latest closes for {latest_closes['ticker'].nunique()} tickers.")
-
-    selected_tickers: List[str] = select_tickers_below_price(
-        latest_closes=latest_closes,
-        max_price=max_price,
-    )
-    print(
-        f"Number of tickers with close < {max_price} USD on or before {as_of_date}: "
-        f"{len(selected_tickers)}"
+    selected_tickers = select_tickers_below_price(latest_closes=latest_closes, max_price=max_price)
+    log.info(
+        "Tickers with close < %.2f USD on or before %s: %d",
+        max_price,
+        as_of_date,
+        len(selected_tickers),
     )
 
     if not selected_tickers:
-        print("No tickers met the price criterion. Exiting.")
+        log.warning("No tickers met the price criterion. Exiting.")
         return
 
-    history: Dict[str, pd.DataFrame] = download_history_for_tickers(
+    history = download_history_for_tickers(
         tickers=selected_tickers,
         period=history_period,
         batch_size=batch_size,
     )
 
     if not history:
-        print("No historical data downloaded for selected tickers. Exiting.")
+        log.warning("No historical data downloaded. Exiting.")
         return
 
-    save_history_to_csv(
-        history=history,
-        output_dir=output_dir,
-        as_of_date=as_of_date,
-    )
-
-    print("Done.")
+    save_history_to_csv(history=history, output_dir=output_dir, as_of_date=as_of_date)
+    log.info("Done.")
 
 
 def parse_args() -> argparse.Namespace:
-    """
-    Build and parse CLI arguments.
-    """
     parser = argparse.ArgumentParser(
         description=(
             "Download S&P 500 + NASDAQ-100 stocks below a target price and "
             "store one year of daily history per ticker."
         )
     )
-    parser.add_argument(
-        "--max-price",
-        type=float,
-        default=MAX_PRICE,
-        help=(
-            "Maximum close price (USD) a ticker must be under. "
-            "Default: %(default)s."
-        ),
-    )
-    parser.add_argument(
-        "--history-period",
-        type=str,
-        default=HISTORY_PERIOD,
-        help="yfinance period string for history downloads. Default: %(default)s.",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=OUTPUT_DIR,
-        help="Directory to store CSVs. Default: %(default)s.",
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=BATCH_SIZE,
-        help="Number of tickers per yfinance batch request. Default: %(default)s.",
-    )
+    parser.add_argument("--max-price", type=float, default=MAX_PRICE)
+    parser.add_argument("--history-period", type=str, default=HISTORY_PERIOD)
+    parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
+    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
     return parser.parse_args()
 
 
