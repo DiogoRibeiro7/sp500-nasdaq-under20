@@ -4,7 +4,12 @@ on:
   schedule:
     # Every day at 01:00 UTC
     - cron: "0 1 * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      max_price:
+        description: "Maximum close price (USD) for the ticker filter"
+        required: false
+        default: "30"
 
 jobs:
   update-under20-csv:
@@ -33,7 +38,8 @@ jobs:
 
       - name: Run update script
         run: |
-          python scripts/update_under20_master_csv.py
+          python scripts/update_under20_master_csv.py \
+            --max-price "${{ github.event.inputs.max_price || '30' }}"
 
       - name: Configure git for commit
         run: |
@@ -42,15 +48,33 @@ jobs:
 
       - name: Commit and push changes if any
         run: |
-          # Show status for debugging (optional)
           git status
 
-          # If there are any changes (tracked or untracked), commit them
           if [ -n "$(git status --porcelain)" ]; then
+            # Stage the master history CSV (always updated when tickers are found)
             git add data/under20_history.csv
+
+            # Stage the NASDAQ cache if it was created or refreshed this run.
+            # Without this the cache is never persisted, so every run re-fetches
+            # the NASDAQ-100 list from Wikipedia — adding latency and a network
+            # failure point.
+            if [ -f data/nasdaq_tickers.csv ]; then
+              git add data/nasdaq_tickers.csv
+            fi
+
             git commit -m "chore: update under-20 stocks CSV [skip ci]"
             git push
           else
             echo "No changes to commit."
           fi
 
+      - name: Upload CSVs as workflow artifact on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: under20-partial-output
+          path: |
+            data/under20_history.csv
+            data/nasdaq_tickers.csv
+          if-no-files-found: ignore
+          retention-days: 7
