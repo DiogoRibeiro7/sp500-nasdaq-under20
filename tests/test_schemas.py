@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import pandera.pandas
 import pandera.errors
 import pytest
 

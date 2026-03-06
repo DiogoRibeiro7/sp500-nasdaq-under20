@@ -435,11 +435,18 @@ class TestLoadExistingMaster:
     def test_adds_name_column_to_old_csv(self, tmp_path, monkeypatch):
         import update_under20_master_csv as m
         csv_path = tmp_path / "master.csv"
-        # Write a CSV without the Name column (old format)
+        # Write a CSV without the Name column (old format) but with all OHLCV
+        # columns — this is what a real pre-Name master CSV looked like.
+        # The backwards-compat path in _load_existing_master only adds Name.
         pd.DataFrame({
-            "Date": ["2024-01-02"],
-            "Ticker": ["AAA"],
-            "Close": [9.5],
+            "Date":      ["2024-01-02"],
+            "Ticker":    ["AAA"],
+            "Open":      [9.0],
+            "High":      [11.0],
+            "Low":       [8.5],
+            "Close":     [9.5],
+            "Adj Close": [9.5],
+            "Volume":    [1_000_000.0],
         }).to_csv(csv_path, index=False)
 
         monkeypatch.setattr(m, "MASTER_CSV_PATH", csv_path)
