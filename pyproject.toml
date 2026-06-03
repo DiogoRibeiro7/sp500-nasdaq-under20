@@ -15,7 +15,7 @@ license = { file = "LICENSE" }
 requires-python = ">=3.11"
 dependencies = [
     "pandas[lxml]>=2.0",
-    "yfinance>=0.2.66",
+    "yfinance>=1.2.1",
     "lxml>=5",
     "requests>=2.32",
     "pandera>=0.18",
