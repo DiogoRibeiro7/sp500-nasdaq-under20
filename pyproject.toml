@@ -14,7 +14,7 @@ readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.11"
 dependencies = [
-    "pandas[lxml]>=2.0",
+    "pandas[lxml]>=3.0.2",
     "yfinance>=0.2.66",
     "lxml>=5",
     "requests>=2.32",
