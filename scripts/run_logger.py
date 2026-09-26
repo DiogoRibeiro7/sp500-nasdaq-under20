@@ -41,6 +41,7 @@ from pathlib import Path
 import pandas as pd
 
 from config import RUN_LOG_PATH
+from csv_io import read_csv, write_csv
 
 _COLUMNS = [
     "run_ts",
@@ -97,12 +98,12 @@ def log_run(
         "status":        status,
     }
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-
     # Append mode: write header only if the file does not yet exist.
     write_header = not path.exists()
-    pd.DataFrame([row], columns=_COLUMNS).to_csv(
+    write_csv(
+        pd.DataFrame([row], columns=_COLUMNS),
         path,
+        create_parent=True,
         mode="a",
         index=False,
         header=write_header,
@@ -128,4 +129,4 @@ def load_run_log(path: Path = RUN_LOG_PATH) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame(columns=_COLUMNS)
 
-    return pd.read_csv(path, parse_dates=["run_ts", "as_of_date"])
+    return read_csv(path, parse_dates=["run_ts", "as_of_date"])
