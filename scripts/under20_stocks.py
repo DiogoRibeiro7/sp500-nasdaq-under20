@@ -18,14 +18,16 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-from pathlib import Path
 from io import StringIO
+from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
-import requests
-from requests.exceptions import RequestException, Timeout
 
 import pandas as pd
+import requests
 import yfinance as yf
+from requests.exceptions import RequestException, Timeout
+
+from csv_io import ensure_directory, read_csv, write_csv
 
 NASDAQ_CACHE_PATH = Path("data") / "nasdaq_tickers.csv"
 
@@ -205,7 +207,7 @@ def _load_cached_nasdaq_tickers() -> Tuple[List[str], Dict[str, str]]:
     if not NASDAQ_CACHE_PATH.exists():
         return [], {}
 
-    df = pd.read_csv(NASDAQ_CACHE_PATH)
+    df = read_csv(NASDAQ_CACHE_PATH)
     if "Symbol" not in df.columns:
         raise RuntimeError(
             f"Cached NASDAQ tickers file {NASDAQ_CACHE_PATH} has no 'Symbol' column."
@@ -242,14 +244,13 @@ def _save_cached_nasdaq_tickers(symbols: List[str], ticker_to_name: Dict[str, st
     if not symbols:
         return
 
-    NASDAQ_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame(
         {
             "Symbol": symbols,
             "Security Name": [ticker_to_name.get(sym, "") for sym in symbols],
         }
     )
-    df.to_csv(NASDAQ_CACHE_PATH, index=False)
+    write_csv(df, NASDAQ_CACHE_PATH, create_parent=True, index=False)
 
 
 def _fetch_nasdaq100_from_wikipedia() -> Tuple[List[str], Dict[str, str]]:
@@ -664,7 +665,7 @@ def save_history_to_csv(
     as_of_date : dt.date
         Date used in output file names (usually the last trading day).
     """
-    output_dir.mkdir(parents=True, exist_ok=True)
+    ensure_directory(output_dir)
     date_str: str = as_of_date.strftime("%Y%m%d")
 
     for ticker, df in history.items():
@@ -672,7 +673,7 @@ def save_history_to_csv(
         if df.empty:
             continue
         file_path: Path = output_dir / f"{ticker}_history_until_{date_str}.csv"
-        df.to_csv(file_path, index_label="Date")
+        write_csv(df, file_path, index_label="Date")
         print(f"Saved history for {ticker} to {file_path}")
 
 

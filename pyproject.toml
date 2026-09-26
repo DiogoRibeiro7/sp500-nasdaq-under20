@@ -12,8 +12,9 @@ version = "0.1.0"
 description = "Daily OHLCV history for S&P 500 + NASDAQ-100 stocks trading below a price ceiling."
 readme = "README.md"
 license = { file = "LICENSE" }
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.15"
 dependencies = [
+    "DataExcept>=1.7,<2",
     "pandas[lxml]>=2.0",
     "yfinance>=0.2.66",
     "lxml>=5",

@@ -3,3 +3,4 @@ yfinance>=0.2.66
 lxml>=5
 requests>=2.32
 pandera>=0.18
+DataExcept>=1.7,<2

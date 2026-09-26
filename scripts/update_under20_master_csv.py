@@ -41,6 +41,7 @@ from config import (  # noqa: E402
     MAX_PRICE,
     NAME_BATCH_SIZE,
 )
+from csv_io import read_csv, write_csv  # noqa: E402
 from log_config import get_logger  # noqa: E402
 from run_logger import log_run  # noqa: E402
 from schemas import validate_latest_closes, validate_master_csv  # noqa: E402
@@ -106,7 +107,7 @@ def _load_existing_master() -> pd.DataFrame:
                      "Close", "Adj Close", "Volume"]
         )
 
-    df = pd.read_csv(MASTER_CSV_PATH, parse_dates=["Date"])
+    df = read_csv(MASTER_CSV_PATH, parse_dates=["Date"])
 
     if "Name" not in df.columns:
         log.debug("Master CSV has no Name column — adding for backwards compatibility.")
@@ -328,8 +329,6 @@ def main(
     log.info("Rows added this run : %d", new_rows_added)
     log.info("Total master rows   : %d", len(updated))
 
-    MASTER_CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
-
     desired_order = [
         "Date", "Ticker", "Name", "Open", "High", "Low",
         "Close", "Adj Close", "Volume",
@@ -347,7 +346,7 @@ def main(
                 new_rows_added, len(updated), max_price, "validation_error")
         raise
 
-    updated.to_csv(MASTER_CSV_PATH, index=False)
+    write_csv(updated, MASTER_CSV_PATH, create_parent=True, index=False)
     log.info("Master CSV written  : %s", MASTER_CSV_PATH)
 
     log_run(

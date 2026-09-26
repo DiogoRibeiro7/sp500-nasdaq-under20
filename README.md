@@ -35,6 +35,8 @@ weekday morning via GitHub Actions.
 
 ## Quick start
 
+Requires Python 3.11 through 3.14.
+
 ```bash
 pip install -r requirements.txt
 ```
@@ -133,6 +135,10 @@ keeps the run time short even for large universes.
 schemas are enforced at three points: after the price fetch, before reading
 the existing CSV, and before writing the updated one. If validation fails, the
 write is aborted so a good existing CSV is never overwritten with bad data.
+
+**CSV file failures keep their cause** — DataExcept identifies unreadable files,
+malformed CSV data, and failed writes with the affected path. Pandera still reports
+schema violations separately.
 
 ---
 
