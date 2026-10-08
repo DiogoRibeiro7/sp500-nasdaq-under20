@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/project-avatar.png" alt="sp500-nasdaq-under20 project logo" width="160" height="160">
+</p>
+
 # sp500-nasdaq-under20
 
 A lightweight data pipeline that identifies S&P 500 and NASDAQ-100 stocks
