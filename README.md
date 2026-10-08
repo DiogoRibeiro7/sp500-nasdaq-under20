@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/project-avatar.png" alt="sp500-nasdaq-under20 project logo" width="160" height="160">
+  <img src="assets/project-logo.png" alt="sp500-nasdaq-under20 project logo" width="160" height="160">
 </p>
 
 # sp500-nasdaq-under20

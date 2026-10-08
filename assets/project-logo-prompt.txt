@@ -1,0 +1,7 @@
+Tool: built-in image generation
+
+Use case: logo-brand.
+Asset type: square project logo for sp500-nasdaq-under20.
+Project purpose: Data pipeline identifying S&P 500 and NASDAQ-100 stocks trading below a configurable price ceiling, maintaining a consolidated daily dataset.
+Design direction: A compact retro terminal-pixel emblem: phosphor-green stepped price bars pass beneath a cyan horizontal price ceiling, with one amber candidate pixel singled out. Strict visible square pixel construction and sharply stepped edges, near-black charcoal background. Compose like a sophisticated 1980s financial terminal glyph; no tiny text, no numbers, no smoothing, no glow overload.
+Composition: one finished square image, visually distinctive and readable at 160 pixels, with enough margin for README display. Produce the actual artwork, not a mockup sheet or brand presentation. No watermark. Do not use a navy-and-gold metallic badge aesthetic.
